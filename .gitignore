@@ -1,0 +1,30 @@
+# dependencies (recreated by `npm install`)
+node_modules/
+
+# runtime data: database, snapshots, audio clips, uploaded PDFs, student details
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# secrets and local environment
+.env
+.env.*
+
+# logs
+*.log
+npm-debug.log*
+
+# build / deploy tool folders
+.vercel/
+.render/
+
+# archives
+*.zip
+
+# editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

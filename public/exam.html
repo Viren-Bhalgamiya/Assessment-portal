@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Examination</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body data-page="Examination">
+  <!-- Loading -->
+  <section id="screen-loading" class="center-screen"><div class="spinner"></div></section>
+
+  <!-- Status messages: awaiting approval / not started / submitted / terminated -->
+  <section id="screen-message" hidden>
+    <header class="site-header">
+      <div class="site-brand"><span class="emblem">EX</span>
+        <div><div class="org" data-org>Online Examination System</div><div class="exam" data-exam>Examination</div></div></div>
+    </header>
+    <div class="center-screen">
+      <div class="card message-card">
+        <div id="msg-icon" class="msg-icon"></div>
+        <h1 id="msg-title"></h1>
+        <p id="msg-body"></p>
+        <div class="msg-actions">
+          <button id="msg-refresh" class="primary" hidden>Refresh</button>
+          <button id="msg-logout">Sign Out</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- General instructions & system check -->
+  <section id="screen-setup" hidden>
+    <header class="topbar">
+      <div class="site-brand"><span class="emblem">EX</span>
+        <div><div class="org" data-org>Online Examination System</div><div class="exam" data-exam>Examination</div></div></div>
+      <span class="spacer"></span>
+      <span class="who">Candidate: <strong id="setup-who"></strong></span>
+      <button class="small" id="setup-logout">Sign Out</button>
+    </header>
+    <div class="setup">
+      <div class="setup-title">
+        <div>
+          <span class="eyebrow">Before you begin</span>
+          <h1>General Instructions</h1>
+          <p class="lead">Please read the following instructions carefully before starting the test. <span id="hero-subjects"></span></p>
+        </div>
+        <div class="hero-stats">
+          <div><strong id="hs-q">—</strong><span>Questions</span></div>
+          <div><strong id="hs-t">—</strong><span>Minutes</span></div>
+          <div><strong id="hs-w">3</strong><span>Violations allowed</span></div>
+        </div>
+      </div>
+
+      <div id="resume-note" class="alert warn" hidden></div>
+
+      <div class="setup-grid">
+        <div class="card">
+          <h2>Instructions</h2>
+          <ol class="rules" id="rules"></ol>
+          <div class="legend-demo">
+            <span><i class="st">1</i>You have not visited the question</span>
+            <span><i class="st not-answered">2</i>You have not answered the question</span>
+            <span><i class="st answered">3</i>You have answered the question</span>
+            <span><i class="st marked">4</i>Not answered, marked for review</span>
+            <span><i class="st marked answered">5</i>Answered and marked for review (will be evaluated)</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>System Compatibility Check</h2>
+          <div class="steps">
+            <div class="step" id="step-camera">
+              <div class="num"></div>
+              <div class="body"><strong>Webcam</strong><span class="status">Your face must remain visible throughout the test.</span></div>
+              <button id="btn-camera" class="small">Enable Camera</button>
+            </div>
+            <div class="step" id="step-mic">
+              <div class="num"></div>
+              <div class="body"><strong>Microphone</strong><span class="status">Audio is monitored; speech near you is recorded.</span>
+                <span class="mic-meter" id="setup-mic-meter" hidden><i></i></span></div>
+              <button id="btn-mic" class="small">Enable Microphone</button>
+            </div>
+            <div class="step" id="step-screen">
+              <div class="num"></div>
+              <div class="body"><strong>Screen sharing</strong><span class="status">Select "Entire screen" when prompted.</span></div>
+              <button id="btn-screen" class="small">Share Screen</button>
+            </div>
+            <div class="step" id="step-monitor">
+              <div class="num"></div>
+              <div class="body"><strong>Display</strong><span class="status">Only one monitor may be connected.</span></div>
+              <button id="btn-monitor" class="small">Check Display</button>
+            </div>
+          </div>
+
+          <div class="preview-wrap">
+            <video id="setup-preview" class="setup-preview" autoplay muted playsinline hidden></video>
+            <div style="flex:1;min-width:240px">
+              <label class="agree"><input type="checkbox" id="agree">
+                <span>I have read and understood the instructions. I agree that my webcam, microphone and screen will be monitored and recorded during the test, and that any violation may lead to automatic submission.</span></label>
+              <button class="primary lg block" id="btn-start" disabled>I am ready to begin</button>
+              <p class="error-text" id="setup-error" role="alert"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <footer class="site-footer">&copy; <span data-year></span> <span data-org>Online Examination System</span>. All rights reserved.</footer>
+  </section>
+
+  <!-- Test -->
+  <section id="screen-exam" hidden>
+    <header class="exam-header">
+      <div class="site-brand"><span class="emblem">EX</span>
+        <div><div class="org" data-org>Online Examination System</div><div class="exam" data-exam>Examination</div></div></div>
+      <span id="exam-who" hidden></span>
+      <span class="spacer"></span>
+      <span class="save-status" id="save-status"></span>
+      <div class="warn-meter" id="warnings" title="Violations">Violations <span class="pips" id="warn-pips"></span></div>
+      <div class="timer-wrap" id="timer-wrap" title="Time left"><span class="lbl" id="timer-label">Time Left</span><span id="timer">--:--</span></div>
+    </header>
+    <nav class="section-tabs" id="section-tabs"></nav>
+
+    <div class="exam-main">
+      <section class="q-panel">
+        <div class="q-head">
+          <span class="qno" id="q-no"></span>
+          <span class="badge neutral" id="q-section"></span>
+          <span class="spacer"></span>
+          <span class="marks">Marks: <b class="pos" id="q-marks">+4</b> &nbsp;|&nbsp; Negative Marks: <b class="neg" id="q-neg">−1</b></span>
+        </div>
+        <div class="q-body" id="q-body"></div>
+        <div class="q-foot">
+          <button class="review" id="btn-review-next">Mark for Review &amp; Next</button>
+          <button id="btn-clear">Clear Response</button>
+          <span class="spacer"></span>
+          <button id="btn-prev">Back</button>
+          <button id="btn-save-next">Save &amp; Next</button>
+        </div>
+      </section>
+
+      <aside class="side-panel">
+        <div class="cam-box" id="cam-box">
+          <video id="cam-video" autoplay muted playsinline></video>
+          <div class="cand">
+            <strong id="cand-name"></strong>
+            <span>Roll No: <span id="cand-roll"></span></span>
+            <div class="cam-tag"><span class="dot"></span>Proctoring active</div>
+            <div class="mic-row" title="Microphone level">Mic <span class="mic-meter" id="exam-mic-meter"><i></i></span></div>
+          </div>
+        </div>
+        <div class="legend">
+          <span><i class="st answered" id="lg-answered">0</i>Answered</span>
+          <span><i class="st not-answered" id="lg-not-answered">0</i>Not Answered</span>
+          <span><i class="st" id="lg-not-visited">0</i>Not Visited</span>
+          <span><i class="st marked" id="lg-marked">0</i>Marked for Review</span>
+          <span class="wide"><i class="st marked answered" id="lg-answered-marked">0</i>Answered &amp; Marked for Review (will be evaluated)</span>
+        </div>
+        <div class="pal-title" id="pal-title"></div>
+        <div class="palette" id="palette"></div>
+        <div class="side-submit"><button class="block" id="btn-submit">Submit Test</button></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Use-case round -->
+  <section id="screen-usecase" hidden>
+    <header class="topbar">
+      <div class="site-brand"><span class="emblem">EX</span>
+        <div><div class="org" data-org>Online Examination System</div><div class="exam" data-exam>Examination</div></div></div>
+      <span class="spacer"></span>
+      <span class="who">Candidate: <strong id="uc-who"></strong></span>
+      <div class="timer-wrap" id="uc-timer-wrap" hidden><span class="lbl">Time Left</span><span id="uc-timer">--:--</span></div>
+      <button class="small" id="uc-logout">Sign Out</button>
+    </header>
+
+    <!-- instructions -->
+    <div class="setup" id="uc-intro">
+      <div class="setup-title">
+        <div>
+          <span class="eyebrow">Use-Case Round</span>
+          <h1>General Instructions</h1>
+          <p class="lead">Please read the following instructions carefully before starting.</p>
+        </div>
+        <div class="hero-stats">
+          <div><strong id="uc-hs-t">—</strong><span>Minutes</span></div>
+          <div><strong id="uc-hs-m">—</strong><span>Maximum marks</span></div>
+        </div>
+      </div>
+      <div class="card uc-intro-card">
+        <h2>Instructions</h2>
+        <ol class="rules" id="uc-rules"></ol>
+        <div class="uc-intro-actions">
+          <label class="agree"><input type="checkbox" id="uc-agree">
+            <span>I have read and understood the instructions. I understand that the timer starts as soon as I click "Start", and that I can submit only once.</span></label>
+          <button class="primary lg" id="uc-start" disabled>Start</button>
+          <p class="error-text" id="uc-start-error" role="alert"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- the assigned use case -->
+    <div class="uc-work" id="uc-work" hidden>
+      <div class="uc-problem card">
+        <span class="eyebrow">Your Use Case</span>
+        <h1 id="uc-title"></h1>
+        <div class="uc-desc" id="uc-desc"></div>
+        <div class="uc-pdf" id="uc-pdf-wrap" hidden>
+          <div class="uc-pdf-bar"><strong>Problem Statement (PDF)</strong><span class="spacer"></span><a id="uc-pdf-open" target="_blank" rel="noopener">Open in a new tab</a></div>
+          <iframe id="uc-pdf" title="Use case document"></iframe>
+        </div>
+      </div>
+      <div class="uc-answer panel">
+        <div class="panel-title">Submit Your Solution</div>
+        <div class="panel-body">
+          <label class="field"><span>Solution link</span>
+            <input type="text" id="uc-url" placeholder="https://" autocomplete="off" spellcheck="false" maxlength="2000"></label>
+          <p class="muted uc-hint">Paste one link to your solution (for example a GitHub repository, Google Drive folder or deployed app). Make sure the link can be opened by the examiners without signing in.</p>
+          <button class="primary block" id="uc-submit">Submit Solution</button>
+          <p class="error-text" id="uc-error" role="alert"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Use-case submit confirmation -->
+  <div id="uc-confirm" class="modal" hidden>
+    <div class="card modal-card">
+      <h2>Submit Solution</h2>
+      <p>You are submitting the following link. You can't change it after submitting.</p>
+      <p class="uc-confirm-url" id="uc-confirm-url"></p>
+      <div class="actions">
+        <button id="uc-confirm-cancel">Cancel</button>
+        <button class="primary" id="uc-confirm-ok">Submit</button>
+      </div>
+    </div>
+  </div>
+
+  <video id="screen-video" class="offscreen" autoplay muted playsinline></video>
+  <canvas id="snap-canvas" hidden></canvas>
+
+  <!-- Blocking overlay (full-screen exit, camera/screen stopped, extra display) -->
+  <div id="overlay" class="overlay" hidden>
+    <div class="card modal-card">
+      <div class="msg-icon" id="overlay-icon"></div>
+      <h2 id="overlay-title"></h2>
+      <p id="overlay-body"></p>
+      <div class="actions"><button class="primary" id="overlay-action"></button></div>
+      <p class="error-text" id="overlay-error"></p>
+    </div>
+  </div>
+
+  <!-- Violation notice -->
+  <div id="warn-modal" class="modal" hidden>
+    <div class="card modal-card warn-card">
+      <h2 id="warn-title">Warning</h2>
+      <p id="warn-body"></p>
+      <div class="pips big" id="warn-modal-pips"></div>
+      <p class="warn-left" id="warn-left"></p>
+      <div class="actions"><button class="danger-solid" id="warn-ok">I Understand</button></div>
+    </div>
+  </div>
+
+  <!-- Submit confirmation -->
+  <div id="confirm-modal" class="modal" hidden>
+    <div class="card modal-card">
+      <h2>Submit Test</h2>
+      <p id="confirm-note">You can't change your answers after submitting.</p>
+      <table class="confirm-table" id="confirm-stats"></table>
+      <div class="actions">
+        <button id="confirm-cancel">Cancel</button>
+        <button class="primary" id="confirm-ok">Submit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Finish a timed section -->
+  <div id="section-modal" class="modal" hidden>
+    <div class="card modal-card">
+      <h2 id="section-modal-title">Finish Section</h2>
+      <p id="section-modal-body"></p>
+      <table class="confirm-table" id="section-stats"></table>
+      <div class="actions">
+        <button id="section-cancel">Cancel</button>
+        <button class="primary" id="section-ok">Finish Section</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/exam.js"></script>
+</body>
+</html>

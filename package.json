@@ -1,0 +1,18 @@
+{
+  "name": "assessment-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Proctored MCQ exam portal: student login, tab-switch/copy-paste blocking, camera and screen monitoring, timer, admin-only results.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "create-admin": "node scripts/create-admin.js"
+  },
+  "dependencies": {
+    "compression": "^1.8.2",
+    "express": "^4.21.2"
+  }
+}

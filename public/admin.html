@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Examination Administration</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body data-page="Examination Administration">
+  <header class="admin-bar">
+    <span class="emblem">EX</span>
+    <div>
+      <div class="sub" data-org>Online Examination System</div>
+      <div class="title"><span data-exam>Examination</span> · Administration</div>
+    </div>
+    <span id="exam-state" class="badge"></span>
+    <span class="spacer"></span>
+    <span class="admin-who">Signed in as <strong id="admin-who"></strong></span>
+    <button class="small" id="btn-logout">Sign Out</button>
+  </header>
+  <nav class="tabs">
+    <button data-tab="results" class="active">Dashboard &amp; Results</button>
+    <button data-tab="students">Candidates <span class="badge warn" id="tab-pending" hidden></span></button>
+    <button data-tab="questions">Question Bank</button>
+    <button data-tab="usecases">Use Cases</button>
+    <button data-tab="settings">Configuration</button>
+  </nav>
+
+  <main class="admin-main">
+    <!-- Results -->
+    <section id="tab-results">
+      <div class="stats" id="stats"></div>
+      <div id="mcq-results">
+      <div class="toolbar">
+        <h3 class="section-title">Candidate Results</h3>
+        <span class="spacer"></span>
+        <input type="text" id="search" placeholder="Search by roll number or name">
+        <select id="filter-status">
+          <option value="">All statuses</option>
+          <option value="in_progress">In progress</option>
+          <option value="submitted">Submitted</option>
+          <option value="not_started">Not started</option>
+        </select>
+        <span class="muted" id="last-refresh" style="font-size:12.5px"></span>
+        <button id="btn-refresh">Refresh</button>
+        <button class="primary" id="btn-export">Export Results (CSV)</button>
+      </div>
+      <div class="table-wrap"><table class="data" id="results-table"></table></div>
+      </div>
+      <div id="uc-results" hidden>
+        <div class="toolbar">
+          <h3 class="section-title">Use-Case Round: Submissions &amp; Evaluation</h3>
+          <span class="spacer"></span>
+          <input type="text" id="uc-search" placeholder="Search by roll number or name">
+          <select id="uc-filter">
+            <option value="">All statuses</option>
+            <option value="in_progress">In progress</option>
+            <option value="submitted">Submitted</option>
+            <option value="pending_eval">Awaiting evaluation</option>
+            <option value="evaluated">Evaluated</option>
+            <option value="not_started">Not started</option>
+          </select>
+          <button id="uc-refresh">Refresh</button>
+          <button class="primary" id="uc-export">Export Results (CSV)</button>
+        </div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">Open each solution link, then enter the marks and remarks and click <b>Save</b>. Solution links open in a new tab.</p>
+        <div class="table-wrap"><table class="data" id="uc-table"></table></div>
+      </div>
+    </section>
+
+    <!-- Candidates -->
+    <section id="tab-students" hidden>
+      <div class="panel-grid" style="margin-bottom:20px">
+        <div class="card">
+          <h3 class="section-title" style="margin-bottom:12px">Add Candidate</h3>
+          <form id="form-one" autocomplete="off">
+            <label class="field"><span>Roll Number</span><input type="text" id="one-roll" required placeholder="e.g. 21CS1001"></label>
+            <label class="field"><span>Full Name</span><input type="text" id="one-name" required placeholder="As per college records"></label>
+            <label class="field"><span>Password <span class="muted" style="font-weight:400">(minimum 6 characters; leave blank to auto-generate)</span></span><input type="text" id="one-pass" placeholder="Password"></label>
+            <button class="primary" type="submit">Add Candidate</button>
+          </form>
+        </div>
+        <div class="card">
+          <h3 class="section-title" style="margin-bottom:6px">Bulk Upload Candidates</h3>
+          <p class="muted" style="margin:0 0 10px;font-size:13px">Enter one candidate per line in the format <code>roll number, name, password</code>. If the password is omitted, one is generated. Rows can be pasted directly from Excel.</p>
+          <textarea id="bulk" rows="7" spellcheck="false" placeholder="21CS1001, Asha Verma, Asha@2026&#10;21CS1002, Rahul Nair"></textarea>
+          <div style="margin-top:10px"><button class="primary" id="btn-bulk">Upload Candidates</button></div>
+        </div>
+      </div>
+      <div id="create-result" class="card credentials" hidden style="margin:0 0 20px"></div>
+
+      <div class="toolbar">
+        <h3 class="section-title">Registrations Pending Approval <span class="badge warn" id="pending-count">0</span></h3>
+        <span class="muted" style="font-size:12.5px">Verify the roll number and name against college records before approving.</span>
+        <span class="spacer"></span>
+        <button class="primary" id="btn-approve-all">Approve All</button>
+      </div>
+      <div class="table-wrap"><table class="data" id="pending-table"></table></div>
+      <div class="toolbar" style="margin-top:24px">
+        <h3 class="section-title">Registered Candidates</h3>
+        <span class="spacer"></span>
+        <input type="text" id="student-search" placeholder="Search by roll number or name">
+      </div>
+      <div class="table-wrap"><table class="data" id="students-table"></table></div>
+    </section>
+
+    <!-- Question bank -->
+    <section id="tab-questions" hidden>
+      <div class="toolbar">
+        <h3 class="section-title">Question Bank <span class="badge primary" id="q-count"></span></h3>
+        <span class="spacer"></span>
+        <select id="q-section"></select>
+        <input type="text" id="q-search" placeholder="Search questions">
+        <button class="primary" id="btn-add-q">Add Question</button>
+      </div>
+      <div id="q-live" class="alert warn" hidden></div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 12px">Questions within each section, and their options, are shuffled separately for every candidate. Each question carries its own marks and negative marks (default +4 / −1); use <b>Set Marks</b> to apply a marking scheme to an entire section. Changes to answers or marks are applied to submitted tests automatically.</p>
+      <div class="card" style="padding:14px;margin-bottom:16px">
+        <div class="toolbar" style="margin-bottom:10px">
+          <h3 class="section-title">Sections</h3>
+          <span class="muted" style="font-size:12.5px">Candidates attempt the sections in this order.</span>
+          <span class="spacer"></span>
+          <input type="text" id="new-section" placeholder="New section name" style="max-width:280px">
+          <button class="primary" id="btn-add-section">Add Section</button>
+        </div>
+        <div class="table-wrap"><table class="data" id="sections-table"></table></div>
+      </div>
+      <div id="q-list" class="q-list"></div>
+    </section>
+
+    <!-- Use cases -->
+    <section id="tab-usecases" hidden>
+      <div class="toolbar">
+        <h3 class="section-title">Use Cases <span class="badge primary" id="uc-count"></span></h3>
+        <span class="spacer"></span>
+        <button class="primary" id="btn-add-uc">Add Use Case</button>
+      </div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 12px">Each candidate is assigned one of these use cases at random when they start the use-case round. A use case can have a written description, a PDF, or both. Use cases that have been assigned to a candidate cannot be deleted.</p>
+      <div id="uc-mode-note" class="alert warn" hidden></div>
+      <div class="table-wrap"><table class="data" id="usecases-table"></table></div>
+    </section>
+
+    <!-- Configuration -->
+    <section id="tab-settings" hidden>
+      <div class="card settings-card">
+        <h3 class="section-title" style="margin-bottom:14px">Examination Configuration</h3>
+        <form id="settings-form">
+          <div class="settings-grid" style="grid-template-columns:1fr 1fr">
+            <label class="field"><span>Organisation name</span><input type="text" id="set-org" maxlength="80" required></label>
+            <label class="field"><span>Examination name</span><input type="text" id="set-exam" maxlength="80" required></label>
+          </div>
+          <p style="font-weight:700;font-size:13px;color:var(--head);margin:4px 0 8px">Test Type</p>
+          <label class="switch-row"><input type="radio" name="mode" id="set-mode-mcq" value="mcq">
+            <span><strong>MCQ Test</strong><span class="muted">Proctored multiple-choice test from the Question Bank (webcam, screen sharing, full screen, violation limit).</span></span></label>
+          <label class="switch-row"><input type="radio" name="mode" id="set-mode-uc" value="usecase">
+            <span><strong>Use-Case Round</strong><span class="muted">Each candidate gets one random use case from <b>Use Cases</b> and submits one solution link within the time limit. Not proctored. Marks are entered by the examiner.</span></span></label>
+          <div class="settings-grid" id="uc-settings" style="grid-template-columns:1fr 1fr">
+            <label class="field"><span>Use-case round duration (minutes)</span><input type="number" id="set-uc-duration" min="1" max="600" required></label>
+            <label class="field"><span>Maximum marks</span><input type="number" id="set-uc-marks" min="1" max="1000" required></label>
+          </div>
+          <label class="switch-row"><input type="checkbox" id="set-open">
+            <span><strong>Test is open</strong><span class="muted">Approved candidates can start the test only while this is enabled. Candidates who have already started can always finish.</span></span></label>
+          <label class="switch-row"><input type="checkbox" id="set-reg">
+            <span><strong>Registration is open</strong><span class="muted">Candidates can register from the login page. Disable once registration is complete.</span></span></label>
+          <div id="mcq-settings">
+          <p style="font-weight:700;font-size:13px;color:var(--head);margin:16px 0 8px">MCQ Test Timing</p>
+          <label class="switch-row"><input type="radio" name="timing" id="set-timing-overall" value="overall">
+            <span><strong>Single timer for the whole test</strong><span class="muted">Candidates can move freely between all sections. Uses the duration below.</span></span></label>
+          <label class="switch-row"><input type="radio" name="timing" id="set-timing-section" value="section">
+            <span><strong>Separate timer for each section</strong><span class="muted">Set each section's time in <b>Question Bank → Sections</b>. Sections are attempted in order and are locked when their time ends or the candidate finishes them. Total duration = sum of section times<span id="section-total"></span>.</span></span></label>
+          <div class="settings-grid">
+            <label class="field"><span>Duration (minutes)</span><input type="number" id="set-duration" min="1" max="600" required></label>
+            <label class="field"><span>Violations before auto-submit (1–3)</span><input type="number" id="set-maxv" min="1" max="3" required></label>
+            <label class="field"><span>Snapshot interval (seconds)</span><input type="number" id="set-snap" min="10" max="600" required></label>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:0 0 14px">Each of the following counts as one violation: switching tabs or windows, leaving full-screen mode, reloading the page, copy/paste/right-click attempts, and loss of webcam or screen sharing. Duration changes apply to tests started after saving.</p>
+          </div>
+          <button class="primary" type="submit">Save Configuration</button>
+          <p class="error-text" id="settings-msg"></p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <!-- Candidate detail -->
+  <div id="drawer" class="drawer" hidden>
+    <div class="sheet" id="drawer-sheet"></div>
+  </div>
+  <div id="lightbox" class="lightbox" hidden><img id="lightbox-img" alt="Snapshot"></div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

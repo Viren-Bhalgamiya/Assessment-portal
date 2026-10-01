@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Candidate Login</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body data-page="Candidate Login">
+  <header class="site-header">
+    <div class="site-brand">
+      <span class="emblem">EX</span>
+      <div>
+        <div class="org" data-org>Online Examination System</div>
+        <div class="exam" data-exam>Examination</div>
+      </div>
+    </div>
+    <span class="spacer"></span>
+    <div class="site-meta"><strong>Candidate Login</strong>Computer Based Test</div>
+  </header>
+
+  <main class="login-layout">
+    <section class="panel login-card">
+      <div class="auth-tabs">
+        <button type="button" id="tab-login" class="active">Candidate Login</button>
+        <button type="button" id="tab-register">New Registration</button>
+      </div>
+
+      <form id="login-form" autocomplete="off">
+        <label class="field"><span>Roll Number</span>
+          <div class="input-icon"><input type="text" id="username" required autofocus autocapitalize="off" spellcheck="false" placeholder="Enter your roll number"></div>
+        </label>
+        <label class="field"><span>Password</span>
+          <div class="input-icon"><input type="password" id="password" required placeholder="Enter your password"></div>
+        </label>
+        <button type="submit" class="primary" id="login-btn">Sign In</button>
+        <p class="error-text" id="login-error" role="alert"></p>
+      </form>
+
+      <form id="register-form" autocomplete="off" hidden>
+        <label class="field"><span>Roll Number</span>
+          <div class="input-icon"><input type="text" id="reg-roll" required autocapitalize="off" spellcheck="false" placeholder="As printed on your college ID"></div>
+        </label>
+        <label class="field"><span>Full Name</span>
+          <div class="input-icon"><input type="text" id="reg-name" required placeholder="As per college records"></div>
+        </label>
+        <label class="field"><span>Password</span>
+          <div class="input-icon"><input type="password" id="reg-pass" required minlength="6" placeholder="Minimum 6 characters"></div>
+        </label>
+        <label class="field"><span>Confirm Password</span>
+          <div class="input-icon"><input type="password" id="reg-pass2" required minlength="6" placeholder="Re-enter password"></div>
+        </label>
+        <button type="submit" class="primary" id="reg-btn">Submit Registration</button>
+        <p class="error-text" id="reg-error" role="alert"></p>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">Your registration must be approved by the examination authority before you can sign in to the test.</p>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">Instructions to Candidates</div>
+      <div class="panel-body">
+        <ol class="plain-list" id="login-rules">
+          <li>Use the latest version of Google Chrome or Microsoft Edge on a laptop or desktop computer. Mobile phones and tablets are not permitted.</li>
+          <li>A working webcam and microphone are mandatory. Your face must remain clearly visible, and sound around you is monitored, for the entire duration of the test.</li>
+          <li>You will be asked to share your entire screen. The camera and screen are monitored and recorded throughout the test.</li>
+          <li>The test opens in full-screen mode. Switching tabs or windows, leaving full-screen, or copying and pasting is recorded as a violation.</li>
+          <li>The test is submitted automatically when the permitted number of violations is reached or when the time ends.</li>
+          <li>Do not share your roll number or password. Only one sign-in is allowed at a time.</li>
+        </ol>
+        <table class="facts-table">
+          <tr><th id="fact-q-label">Number of questions</th><td id="fact-q">—</td></tr>
+          <tr><th>Duration (minutes)</th><td id="fact-t">—</td></tr>
+          <tr><th>Marking scheme</th><td id="fact-m">—</td></tr>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">&copy; <span data-year></span> <span data-org>Online Examination System</span>. All rights reserved. &nbsp;|&nbsp; Best viewed in the latest Google Chrome or Microsoft Edge.</footer>
+
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/login.js"></script>
+</body>
+</html>

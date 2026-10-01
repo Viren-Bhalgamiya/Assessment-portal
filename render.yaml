@@ -1,0 +1,29 @@
+# Render Blueprint: the API server plus a persistent disk for the SQLite database and snapshots.
+# Run exactly ONE instance: the database lives on the attached disk.
+services:
+  - type: web
+    name: assessment-portal-api
+    runtime: node
+    plan: standard          # 1 CPU / 2 GB. Use "pro" (2 CPU / 4 GB) for more headroom above ~1000 students.
+    buildCommand: npm ci
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.11.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: TRUST_PROXY
+        value: "2"          # Vercel -> Render. Use "1" if students open the Render URL directly.
+      - key: UV_THREADPOOL_SIZE
+        value: "16"         # parallel password hashing + compression during the login rush
+      - key: ADMIN_USERNAME
+        sync: false         # set in the Render dashboard; creates the first admin on first start
+      - key: ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 20
