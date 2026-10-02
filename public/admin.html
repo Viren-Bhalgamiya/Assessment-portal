@@ -155,31 +155,27 @@
           <label class="switch-row"><input type="radio" name="mode" id="set-mode-uc" value="usecase">
             <span><strong>Use-Case Round</strong><span class="muted">Each candidate gets one random use case from <b>Use Cases</b> and submits one solution link within the time limit. Not proctored. Marks are entered by the examiner.</span></span></label>
           <div class="settings-grid" id="uc-settings" style="grid-template-columns:1fr 1fr">
-            <label class="field"><span>Use-case round duration (minutes)</span><input type="number" id="set-uc-duration" min="1" max="600" required></label>
             <label class="field"><span>Maximum marks</span><input type="number" id="set-uc-marks" min="1" max="1000" required></label>
           </div>
           <p style="font-weight:700;font-size:13px;color:var(--head);margin:16px 0 8px">Test Schedule</p>
-          <div class="settings-grid" style="grid-template-columns:1fr 1fr auto;align-items:end">
+          <div class="schedule-grid">
             <label class="field"><span>Test starts</span><input type="datetime-local" id="set-start"></label>
             <label class="field"><span>Test ends</span><input type="datetime-local" id="set-end"></label>
-            <div class="field"><button type="button" id="btn-clear-schedule">Clear schedule</button></div>
+            <button type="button" id="btn-clear-schedule">Clear schedule</button>
           </div>
-          <p class="muted" id="schedule-note" style="font-size:12.5px;margin:-4px 0 12px">The test opens by itself at the start time and closes at the end time. Candidates can start any time in between; every attempt ends at the end time at the latest, even if the candidate's own time is not over. Leave both empty to open and close the test manually with the switch below.</p>
-          <label class="switch-row" id="row-open"><input type="checkbox" id="set-open">
-            <span><strong>Test is open</strong><span class="muted">Used only when no schedule is set. Approved candidates can start the test only while this is enabled. Candidates who have already started can always finish.</span></span></label>
+          <p class="muted" id="schedule-note" style="font-size:12.5px;margin:-4px 0 12px">The test opens by itself at the start time and closes at the end time. Candidates can start any time in between, and every attempt ends at the end time. <b>Clear schedule</b> closes the test.</p>
           <label class="switch-row"><input type="checkbox" id="set-reg">
             <span><strong>Registration is open</strong><span class="muted">Candidates can register from the login page. Disable once registration is complete.</span></span></label>
           <div id="mcq-settings">
           <p style="font-weight:700;font-size:13px;color:var(--head);margin:16px 0 8px">MCQ Test Timing</p>
           <label class="switch-row"><input type="radio" name="timing" id="set-timing-overall" value="overall">
-            <span><strong>Single timer for the whole test</strong><span class="muted">Candidates can move freely between all sections. Uses the duration below.</span></span></label>
+            <span><strong>Single timer for the whole test</strong><span class="muted">Candidates can move freely between all sections until the test's end time.</span></span></label>
           <label class="switch-row"><input type="radio" name="timing" id="set-timing-section" value="section">
-            <span><strong>Separate timer for each section</strong><span class="muted">Set each section's time in <b>Question Bank → Sections</b>. Sections are attempted in order and are locked when their time ends or the candidate finishes them. Total duration = sum of section times<span id="section-total"></span>.</span></span></label>
+            <span><strong>Separate timer for each section</strong><span class="muted">Set each section's time in <b>Question Bank → Sections</b>. Sections are attempted in order and are locked when their time ends or the candidate finishes them. Total duration = sum of section times<span id="section-total"></span>, but never past the test's end time.</span></span></label>
           <div class="settings-grid">
-            <label class="field"><span>Duration (minutes)</span><input type="number" id="set-duration" min="1" max="600" required></label>
             <label class="field"><span>Violations before auto-submit (1–3)</span><input type="number" id="set-maxv" min="1" max="3" required></label>
           </div>
-          <p class="muted" style="font-size:12.5px;margin:0 0 14px">Each of the following counts as one violation: switching tabs or windows, leaving full-screen mode, reloading the page, copy/paste/right-click attempts, and loss of webcam or screen sharing. Duration changes apply to tests started after saving.</p>
+          <p class="muted" style="font-size:12.5px;margin:0 0 14px">Each of the following counts as one violation: switching tabs or windows, leaving full-screen mode, reloading the page, copy/paste/right-click attempts, and loss of webcam, microphone or screen sharing.</p>
           </div>
           <button class="primary" type="submit">Save Configuration</button>
           <p class="error-text" id="settings-msg"></p>

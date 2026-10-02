@@ -447,4 +447,8 @@ table.data tfoot td { background: #f3f5f8; border-top: 1px solid var(--border); 
 .audio-list audio { height: 32px; flex: 1; max-width: 420px; }
 
 /* test schedule */
-.switch-row.disabled { opacity: .55; }
+.schedule-grid { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; margin-bottom: .95em; }
+.schedule-grid .field { margin-bottom: 0; }
+.schedule-grid input, .schedule-grid button { height: 40px; }
+.schedule-grid button { white-space: nowrap; }
+@media (max-width: 640px) { .schedule-grid { grid-template-columns: 1fr; } }

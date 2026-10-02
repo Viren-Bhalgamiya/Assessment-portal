@@ -246,8 +246,13 @@ function uniformMarking() {
   return same ? { marks: qs[0].marks, negative: qs[0].negative } : null;
 }
 const sectionTimesMissing = () => nonEmptySections().filter((x) => !(x.minutes > 0)).map((x) => x.title);
+// Minutes from the start of the test window (or from now, once it has started) to the end time.
+function scheduledMinutes(s = getSettings()) {
+  if (!s.scheduleStart || !s.scheduleEnd) return 0;
+  return Math.max(0, Math.ceil((s.scheduleEnd - Math.max(s.now, s.scheduleStart)) / 60000));
+}
 function effectiveDurationMin() {
-  if (getSettings().timingMode !== 'section') return getSettings().durationMin;
+  if (getSettings().timingMode !== 'section') return scheduledMinutes();
   return nonEmptySections().reduce((t, x) => t + (x.minutes || 0), 0);
 }
 
@@ -301,7 +306,7 @@ async function activeAttemptOr409(req, res) {
 function closedMessage(s) {
   if (s.scheduleEnd && s.now >= s.scheduleEnd) return 'The test has ended.';
   if (s.scheduleStart && s.now < s.scheduleStart) return 'The test has not started yet.';
-  return 'The test has not been opened yet.';
+  return 'The test has not been scheduled yet.';
 }
 
 const remainingSec = (att) => Math.max(0, Math.ceil((att.deadline - now()) / 1000));
@@ -464,7 +469,7 @@ app.get('/api/registration', async (req, res) => {
     orgName: st.orgName, examName: st.examName,
     mode: st.examMode, useCaseMaxMarks: st.ucMaxMarks,
     open: st.registrationOpen, questionCount: BY_ID.size,
-    durationMin: st.examMode === 'usecase' ? st.ucDurationMin : effectiveDurationMin(), maxWarnings: st.maxViolations,
+    durationMin: st.examMode === 'usecase' ? scheduledMinutes(st) : effectiveDurationMin(), maxWarnings: st.maxViolations,
     marking: uniformMarking(), maxScore: bank().MAX_SCORE,
     subjects: SECTIONS.filter((x) => x.items.length).map((x) => x.title.replace(/^Section [A-Z0-9]+: /, '')),
   });
@@ -528,7 +533,7 @@ app.post('/api/exam/start', requireApprovedStudent, async (req, res) => {
     if (s.examMode !== 'mcq') return res.status(409).json({ error: 'The MCQ test is not active.' });
     if (!bank().BY_ID.size) return res.status(409).json({ error: 'The exam has no questions yet. Contact the examiner.' });
     let timing = null;
-    let totalMs = s.durationMin * 60 * 1000;
+    let totalMs = s.scheduleEnd - now(); // until the end time
     if (s.timingMode === 'section') {
       if (sectionTimesMissing().length) return res.status(409).json({ error: 'The exam is not ready yet (section times are not set). Contact the examiner.' });
       const plan = nonEmptySections().map((x) => ({ key: x.key, title: x.title, sec: x.minutes * 60 }));
@@ -681,7 +686,7 @@ async function ucState(userId) {
   const u = att && att.status === 'in_progress' && att.usecase_id ? await uc.getUseCase(att.usecase_id) : null;
   return {
     mode: s.examMode, examOpen: s.examOpen, scheduleStart: s.scheduleStart, scheduleEnd: s.scheduleEnd, serverTime: s.now,
-    durationMin: s.ucDurationMin, maxMarks: s.ucMaxMarks,
+    durationMin: scheduledMinutes(s), maxMarks: s.ucMaxMarks,
     useCaseCount: await uc.countUseCases(),
     status: att ? att.status : 'none',
     remainingSec: att && att.status === 'in_progress' ? Math.max(0, Math.ceil((att.deadline - now()) / 1000)) : null,
@@ -705,7 +710,7 @@ app.post('/api/usecase/start', requireApprovedStudent, async (req, res) => {
     const t = now();
     try {
       await sql("INSERT INTO uc_attempts (user_id, usecase_id, status, started_at, deadline, ip) VALUES (?, ?, 'in_progress', ?, ?, ?)")
-        .run(req.user.id, pick, t, Math.min(t + s.ucDurationMin * 60 * 1000, s.scheduleEnd || Infinity), req.ip);
+        .run(req.user.id, pick, t, s.scheduleEnd, req.ip);
     } catch (e) {
       if (!isUniqueError(e)) throw e; // double click: the first request already created it
     }
@@ -936,6 +941,7 @@ admin.put('/settings', async (req, res) => {
     const end = val(b.scheduleEnd, cur.scheduleEnd);
     const okTs = (v) => v === null || (Number.isSafeInteger(v) && v > 0);
     if (!okTs(start) || !okTs(end)) errors.push('Enter a valid start and end date and time.');
+    else if (!start !== !end) errors.push('Set both the start and the end time (or clear both).');
     else if (start && end && end <= start) errors.push('The end time must be after the start time.');
     else if (end && end <= now() && end !== cur.scheduleEnd) errors.push('The end time must be in the future.');
     else {
@@ -967,20 +973,14 @@ admin.put('/settings', async (req, res) => {
   if (b.ucDurationMin !== undefined) intIn(b.ucDurationMin, 1, 600) ? await setSetting('uc_duration_min', b.ucDurationMin) : errors.push('Use-case duration must be 1–600 minutes.');
   if (b.ucMaxMarks !== undefined) intIn(b.ucMaxMarks, 1, 1000) ? await setSetting('uc_max_marks', b.ucMaxMarks) : errors.push('Use-case maximum marks must be 1–1000.');
   const st = getSettings();
-  const willOpen = st.examOpenManual || st.scheduleStart;
+  const willOpen = !!st.scheduleStart;
   let notReady = null;
   if (st.examMode === 'usecase' && willOpen && !(await uc.countUseCases())) {
     notReady = 'Add at least one use case before the use-case round opens.';
   } else if (st.examMode === 'mcq' && st.timingMode === 'section' && willOpen && sectionTimesMissing().length) {
     notReady = `Set a time for every section before the exam opens (missing: ${sectionTimesMissing().join(', ')}).`;
   }
-  if (notReady) {
-    errors.push(notReady);
-    if (st.examOpenManual && !st.scheduleStart) {
-      await setSetting('exam_open', '0');
-      errors.push('The test was kept closed.');
-    }
-  }
+  if (notReady) errors.push(notReady);
   if (errors.length) return res.status(400).json({ error: errors.join(' ') });
   res.json(getSettings());
 });

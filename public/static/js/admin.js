@@ -69,7 +69,7 @@ function renderExamState() {
   const s = A.summary.settings;
   const open = s.examOpen;
   const el = $('#exam-state');
-  let state = open ? 'Open' : 'Closed';
+  let state = open ? 'Open' : 'Not scheduled';
   if (s.scheduleEnd && s.now >= s.scheduleEnd) state = 'Ended';
   else if (!open && s.scheduleStart && s.now < s.scheduleStart) state = `Opens ${fmtTime(s.scheduleStart)}`;
   else if (open && s.scheduleEnd) state = `Open until ${fmtTime(s.scheduleEnd)}`;
@@ -686,12 +686,10 @@ async function removeQuestion(q) {
 // ---------- settings ----------
 function fillSettings() {
   const s = A.summary.settings;
-  $('#set-open').checked = s.examOpenManual;
   $('#set-start').value = toLocalInput(s.scheduleStart);
   $('#set-end').value = toLocalInput(s.scheduleEnd);
   syncScheduleFields();
   $('#set-reg').checked = s.registrationOpen;
-  $('#set-duration').value = s.durationMin;
   $('#set-timing-overall').checked = s.timingMode !== 'section';
   $('#set-timing-section').checked = s.timingMode === 'section';
   syncTimingFields();
@@ -700,7 +698,6 @@ function fillSettings() {
   $('#set-exam').value = s.examName;
   $('#set-mode-mcq').checked = s.examMode !== 'usecase';
   $('#set-mode-uc').checked = s.examMode === 'usecase';
-  $('#set-uc-duration').value = s.ucDurationMin;
   $('#set-uc-marks').value = s.ucMaxMarks;
   syncModeFields();
 }
@@ -716,8 +713,6 @@ $('#set-mode-uc').onchange = syncModeFields;
 
 // In per-section mode the overall duration isn't used; show the section total instead.
 async function syncTimingFields() {
-  const section = $('#set-timing-section').checked;
-  $('#set-duration').disabled = section;
   try {
     const qd = Q.data || await api('GET', '/api/admin/questions');
     const used = qd.sections.filter((s) => qd.questions.some((q) => q.section === s.key));
@@ -734,17 +729,14 @@ $('#settings-form').onsubmit = async (e) => {
   msg.textContent = '';
   try {
     await api('PUT', '/api/admin/settings', {
-      examOpen: $('#set-open').checked,
       scheduleStart: fromLocalInput($('#set-start').value),
       scheduleEnd: fromLocalInput($('#set-end').value),
       registrationOpen: $('#set-reg').checked,
-      durationMin: Number($('#set-duration').value),
       timingMode: $('#set-timing-section').checked ? 'section' : 'overall',
       maxViolations: Number($('#set-maxv').value),
       orgName: $('#set-org').value,
       examName: $('#set-exam').value,
       examMode: $('#set-mode-uc').checked ? 'usecase' : 'mcq',
-      ucDurationMin: Number($('#set-uc-duration').value),
       ucMaxMarks: Number($('#set-uc-marks').value),
     });
     await loadSummary();
@@ -953,14 +945,8 @@ function toLocalInput(ms) {
 }
 const fromLocalInput = (v) => (v ? new Date(v).getTime() : null);
 
-function syncScheduleFields() {
-  const scheduled = !!($('#set-start').value || $('#set-end').value);
-  $('#row-open').classList.toggle('disabled', scheduled);
-  $('#set-open').disabled = scheduled;
-}
-$('#set-start').oninput = syncScheduleFields;
-$('#set-end').oninput = syncScheduleFields;
-$('#btn-clear-schedule').onclick = () => { $('#set-start').value = ''; $('#set-end').value = ''; syncScheduleFields(); };
+function syncScheduleFields() {}
+$('#btn-clear-schedule').onclick = () => { $('#set-start').value = ''; $('#set-end').value = ''; };
 
 // ---------- start ----------
 (async () => {

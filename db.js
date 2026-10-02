@@ -303,13 +303,10 @@ async function loadSettings() {
   settingsCache = null;
 }
 
-// Whether candidates may start the test right now. With a schedule the test opens at the start time and
-// closes at the end time by itself; without one the admin's "Test is open" switch decides.
+// The test is open only between the scheduled start and end time set by the admin.
 function openNow(base, t = Date.now()) {
   const { scheduleStart: start, scheduleEnd: end } = base;
-  if (end && t >= end) return false;
-  if (start) return t >= start;
-  return base.examOpenManual;
+  return !!(start && end && t >= start && t < end);
 }
 
 function getSettings() {

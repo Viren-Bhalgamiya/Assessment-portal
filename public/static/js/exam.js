@@ -82,7 +82,7 @@ function showClosed(st) {
     if (wait < 24 * 3600 * 1000) setTimeout(() => location.reload(), wait + 1500 + Math.random() * 3000);
     return;
   }
-  showMessage('Test Not Yet Started', 'The test has not been opened yet. Please wait for the invigilator\'s instruction and click Refresh.', { refresh: true, tone: 'info', ic: 'clock' });
+  showMessage('Test Not Yet Scheduled', 'The test has not been scheduled yet. Please check again later.', { refresh: true, tone: 'info', ic: 'clock' });
 }
 $('#msg-logout').onclick = logout;
 $('#setup-logout').onclick = logout;
@@ -143,7 +143,7 @@ function showSetup(st) {
         'Sections must be attempted in the order shown. When the time for a section ends, or you choose to finish it, the next section opens and you cannot return to the previous section.', true]]
     : [];
   const rules = [
-    ['clock', `The total duration of the test is ${st.durationMin} minutes.${timeNote} The countdown timer at the top right of the screen shows the time remaining. The test is submitted automatically when the time ends.`],
+    ['clock', `The test ends at ${new Date(st.scheduleEnd).toLocaleString(undefined, { day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' })}.${timeNote} The countdown timer at the top right of the screen shows the time remaining. The test is submitted automatically when the time ends.`],
     ...sectionRule,
     ['book', `The test contains ${st.questionCount} multiple-choice questions. Each question has four options, of which only one is correct.`],
     ['book', st.marking
@@ -1045,7 +1045,7 @@ async function initUseCase() {
   $('#uc-hs-m').textContent = st.maxMarks;
   const rules = [
     `You will be assigned one use case (problem statement) at random. Read it carefully and build your solution.`,
-    `The time allowed is ${st.durationMin} minutes. The timer starts as soon as you click "Start" and continues even if you close this page.`,
+    `The round ends at ${new Date(st.scheduleEnd).toLocaleString(undefined, { day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' })} (${st.durationMin} minutes from now). The timer keeps running even if you close this page.`,
     'When you are done, paste one link to your solution (for example a GitHub repository, Google Drive folder or deployed application) in the box provided and click "Submit Solution".',
     'Make sure the link can be opened by the examiners without signing in. A link that cannot be opened may not be evaluated.',
     'You can submit only once. If the time ends before you submit, the round is closed and no solution is recorded.',
