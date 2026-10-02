@@ -12,7 +12,9 @@
     "create-admin": "node scripts/create-admin.js"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.34.0",
     "compression": "^1.8.2",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "pg": "^8.23.1"
   }
 }

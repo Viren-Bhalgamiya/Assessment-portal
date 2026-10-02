@@ -8,6 +8,8 @@ A proctored multiple-choice exam portal.
 
 > **Testing the portal?** Follow [TESTING.md](TESTING.md): setup from the zip, step-by-step test cases, and how to report bugs.
 
+> **Deploying to Azure?** Follow [AZURE.md](AZURE.md): App Service + PostgreSQL + Blob Storage, step by step.
+
 ## Run locally
 
 Requires Node.js **22.13 or newer**. The app uses Node's built-in SQLite, so there is nothing native to compile.

@@ -1,116 +1,14 @@
 'use strict';
+// Database access for the whole app. Two drivers behind one async API:
+//   - SQLite (built into Node) in DATA_DIR/exam.db: the default, for local runs and testing.
+//   - PostgreSQL when DATABASE_URL is set: for Azure App Service (Azure Database for PostgreSQL).
+// Usage: await sql('SELECT ... WHERE id = ?').get(id) / .all(...) / .run(...) / .insert(...)
+// SQL is written once with "?" placeholders and runs on both.
 const fs = require('fs');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const SNAPSHOT_DIR = path.join(DATA_DIR, 'snapshots');
-fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
-
-const db = new DatabaseSync(path.join(DATA_DIR, 'exam.db'));
-
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
-  PRAGMA busy_timeout = 5000;
-  PRAGMA foreign_keys = ON;
-
-  CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    name          TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    role          TEXT NOT NULL CHECK (role IN ('student', 'admin')),
-    created_at    INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    expires_at INTEGER NOT NULL
-  );
-
-  -- One attempt per student. layout = per-student question order and option permutation.
-  -- answers = {questionId: originalOptionIndex}.
-  CREATE TABLE IF NOT EXISTS attempts (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-    status         TEXT NOT NULL CHECK (status IN ('in_progress', 'submitted')),
-    layout         TEXT NOT NULL,
-    answers        TEXT NOT NULL DEFAULT '{}',
-    started_at     INTEGER NOT NULL,
-    deadline       INTEGER NOT NULL,
-    submitted_at   INTEGER,
-    submit_reason  TEXT,
-    score          INTEGER,
-    section_scores TEXT,
-    violations     INTEGER NOT NULL DEFAULT 0,
-    ip             TEXT,
-    user_agent     TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-    type       TEXT NOT NULL,
-    detail     TEXT,
-    counted    INTEGER NOT NULL DEFAULT 0,
-    at         INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS snapshots (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-    kind       TEXT NOT NULL CHECK (kind IN ('camera', 'screen')),
-    file       TEXT NOT NULL,
-    at         INTEGER NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_events_attempt ON events(attempt_id);
-  CREATE INDEX IF NOT EXISTS idx_snapshots_attempt ON snapshots(attempt_id);
-
-  -- short microphone recordings, taken when speech or other sound is detected during the MCQ test
-  CREATE TABLE IF NOT EXISTS audio_clips (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    attempt_id  INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-    file        TEXT NOT NULL,
-    duration_ms INTEGER,
-    at          INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_audio_attempt ON audio_clips(attempt_id);
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-`);
-
-// Students register themselves and wait for admin approval: pending -> approved | rejected.
-if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'status')) {
-  db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'");
-}
-// Highest client event sequence number processed, so re-sent events are never double-counted.
-if (!db.prepare('PRAGMA table_info(attempts)').all().some((c) => c.name === 'last_seq')) {
-  db.exec('ALTER TABLE attempts ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0');
-}
-
-// Per-section timing: the plan frozen at start, the current section and when it started.
-for (const [col, type] of [['timing', 'TEXT'], ['sec_index', 'INTEGER NOT NULL DEFAULT 0'], ['sec_started_at', 'INTEGER']]) {
-  if (!db.prepare('PRAGMA table_info(attempts)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE attempts ADD COLUMN ${col} ${type}`);
-}
-
-// Client-side id of each proctoring event, so a re-sent event is recorded only once.
-if (!db.prepare('PRAGMA table_info(events)').all().some((c) => c.name === 'client_seq')) {
-  db.exec('ALTER TABLE events ADD COLUMN client_seq INTEGER');
-}
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_events_client ON events(attempt_id, client_seq, type) WHERE client_seq IS NOT NULL');
-
-// Indexes for the hot paths at 1000+ concurrent students.
-db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-  CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status, deadline);
-  CREATE INDEX IF NOT EXISTS idx_snapshots_attempt_kind_at ON snapshots(attempt_id, kind, at);
-`);
+const DRIVER = process.env.DATABASE_URL ? 'pg' : 'sqlite';
 
 const DEFAULT_SETTINGS = {
   exam_open: '0',
@@ -125,19 +23,274 @@ const DEFAULT_SETTINGS = {
   max_violations: '3',
   snapshot_interval_sec: '60',
 };
-const insertDefault = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insertDefault.run(k, v);
 
-// Warning limit is capped at 3; older databases may still hold a higher value.
-db.prepare("UPDATE settings SET value = '3' WHERE key = 'max_violations' AND (CAST(value AS INTEGER) > 3 OR CAST(value AS INTEGER) < 1)").run();
+// ---------- schema ----------
+// Identical tables on both databases; only the id, timestamp and number types are spelled differently.
+function schema(d) {
+  const ID = d === 'pg' ? 'BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+  const TS = d === 'pg' ? 'BIGINT' : 'INTEGER';     // millisecond timestamps exceed 32 bits
+  const REF = d === 'pg' ? 'BIGINT' : 'INTEGER';
+  const REAL = d === 'pg' ? 'DOUBLE PRECISION' : 'REAL';
+  const NOCASE = d === 'pg' ? '' : ' COLLATE NOCASE';
+  return `
+  CREATE TABLE IF NOT EXISTS users (
+    id            ${ID},
+    username      TEXT NOT NULL${NOCASE},
+    name          TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL CHECK (role IN ('student', 'admin')),
+    status        TEXT NOT NULL DEFAULT 'approved',  -- students: pending -> approved | rejected
+    created_at    ${TS} NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (${d === 'pg' ? 'lower(username)' : 'username'});
 
-// Settings are read on almost every request, so they are cached in memory (single server process).
+  CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    ${REF} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at ${TS} NOT NULL
+  );
+
+  -- One attempt per student. layout = per-student question order and option permutation.
+  -- answers = {questionId: originalOptionIndex}.
+  CREATE TABLE IF NOT EXISTS attempts (
+    id             ${ID},
+    user_id        ${REF} NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    status         TEXT NOT NULL CHECK (status IN ('in_progress', 'submitted')),
+    layout         TEXT NOT NULL,
+    answers        TEXT NOT NULL DEFAULT '{}',
+    started_at     ${TS} NOT NULL,
+    deadline       ${TS} NOT NULL,
+    submitted_at   ${TS},
+    submit_reason  TEXT,
+    score          ${REAL},
+    section_scores TEXT,
+    violations     INTEGER NOT NULL DEFAULT 0,
+    ip             TEXT,
+    user_agent     TEXT,
+    last_seq       ${TS} NOT NULL DEFAULT 0,
+    timing         TEXT,                 -- per-section timing plan frozen at start
+    sec_index      INTEGER NOT NULL DEFAULT 0,
+    sec_started_at ${TS}
+  );
+
+  CREATE TABLE IF NOT EXISTS events (
+    id         ${ID},
+    attempt_id ${REF} NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    type       TEXT NOT NULL,
+    detail     TEXT,
+    counted    INTEGER NOT NULL DEFAULT 0,
+    at         ${TS} NOT NULL,
+    client_seq ${TS}                     -- browser-side id, so a re-sent event is recorded once
+  );
+
+  CREATE TABLE IF NOT EXISTS snapshots (
+    id         ${ID},
+    attempt_id ${REF} NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('camera', 'screen')),
+    file       TEXT NOT NULL,
+    at         ${TS} NOT NULL
+  );
+
+  -- short microphone recordings, taken when speech or other sound is detected during the MCQ test
+  CREATE TABLE IF NOT EXISTS audio_clips (
+    id          ${ID},
+    attempt_id  ${REF} NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    file        TEXT NOT NULL,
+    duration_ms INTEGER,
+    at          ${TS} NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sections (
+    key      TEXT PRIMARY KEY,
+    name     TEXT NOT NULL,
+    prefix   TEXT NOT NULL UNIQUE,   -- used for question ids, e.g. "ML" -> ML1, ML2
+    position INTEGER NOT NULL,
+    minutes  INTEGER                 -- time for the section with per-section timing (NULL = not set)
+  );
+
+  CREATE TABLE IF NOT EXISTS questions (
+    id         TEXT PRIMARY KEY,
+    section    TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    stem       TEXT NOT NULL,
+    code       TEXT,          -- JSON array of code lines, or NULL
+    sub        TEXT,          -- JSON array of sub-points, or NULL
+    options    TEXT NOT NULL, -- JSON array of exactly 4 options
+    answer     INTEGER NOT NULL CHECK (answer BETWEEN 0 AND 3),
+    solution   TEXT,          -- JSON array of solution lines
+    updated_at ${TS} NOT NULL,
+    marks      ${REAL} NOT NULL DEFAULT 4,
+    negative   ${REAL} NOT NULL DEFAULT 1
+  );
+
+  -- Use-case round: problem statements (with an optional PDF) and each candidate's single attempt.
+  CREATE TABLE IF NOT EXISTS usecases (
+    id          ${ID},
+    title       TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    pdf_name    TEXT,            -- original file name of the attached PDF, or NULL
+    pdf_size    INTEGER,
+    position    INTEGER NOT NULL,
+    created_at  ${TS} NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS uc_attempts (
+    id            ${ID},
+    user_id       ${REF} NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    usecase_id    ${REF} REFERENCES usecases(id),
+    status        TEXT NOT NULL CHECK (status IN ('in_progress', 'submitted')),
+    started_at    ${TS} NOT NULL,
+    deadline      ${TS} NOT NULL,
+    submitted_at  ${TS},
+    submit_reason TEXT,
+    url           TEXT,
+    marks         ${REAL},
+    remarks       TEXT,
+    evaluated_at  ${TS},
+    ip            TEXT
+  );
+
+  -- Indexes for the hot paths at 1000+ concurrent students.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_events_client ON events(attempt_id, client_seq, type) WHERE client_seq IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_events_attempt ON events(attempt_id);
+  CREATE INDEX IF NOT EXISTS idx_snapshots_attempt ON snapshots(attempt_id);
+  CREATE INDEX IF NOT EXISTS idx_snapshots_attempt_kind_at ON snapshots(attempt_id, kind, at);
+  CREATE INDEX IF NOT EXISTS idx_audio_attempt ON audio_clips(attempt_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_attempts_status ON attempts(status, deadline);
+  CREATE INDEX IF NOT EXISTS idx_uc_attempts_status ON uc_attempts(status, deadline);
+  `;
+}
+
+// ---------- drivers ----------
+let driver = null;
+
+function sqliteDriver() {
+  const { DatabaseSync } = require('node:sqlite');
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const db = new DatabaseSync(path.join(DATA_DIR, 'exam.db'));
+  db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
+  // Prepared statements are compiled once and reused: re-preparing on every request
+  // was the largest CPU cost when 1000 students start at once.
+  const statements = new Map();
+  const prep = (text) => {
+    let st = statements.get(text);
+    if (!st) statements.set(text, (st = db.prepare(text)));
+    return st;
+  };
+  return {
+    exec: async (text) => db.exec(text),
+    get: async (text, params) => prep(text).get(...params),
+    all: async (text, params) => prep(text).all(...params),
+    run: async (text, params) => { const r = prep(text).run(...params); return { changes: Number(r.changes) }; },
+    insert: async (text, params) => Number(prep(text).run(...params).lastInsertRowid),
+    columns: async (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name),
+    close: async () => db.close(),
+  };
+}
+
+function pgDriver() {
+  const pg = require('pg');
+  // COUNT(*) and BIGINT columns come back as strings by default; every value here fits in a JS number.
+  pg.types.setTypeParser(20, (v) => Number(v));     // int8
+  pg.types.setTypeParser(1700, (v) => Number(v));   // numeric
+  const ssl = /sslmode=disable/.test(process.env.DATABASE_URL) || process.env.PGSSL === '0' ? false : { rejectUnauthorized: false };
+  const pool = new pg.Pool({
+    connectionString: process.env.DATABASE_URL.replace(/[?&]sslmode=[^&]*/, ''),
+    ssl,
+    max: Number(process.env.PG_POOL_MAX) || 20,
+    idleTimeoutMillis: 30000,
+  });
+  pool.on('error', (e) => console.error('PostgreSQL pool error:', e.message));
+  // "?" placeholders -> $1, $2, ... (the app's SQL never contains a literal "?")
+  const cache = new Map();
+  const conv = (text) => {
+    let t = cache.get(text);
+    if (t === undefined) { let n = 0; t = text.replace(/\?/g, () => `$${++n}`); cache.set(text, t); }
+    return t;
+  };
+  const query = (text, params) => pool.query(conv(text), params);
+  return {
+    exec: async (text) => { await pool.query(text); },
+    get: async (text, params) => (await query(text, params)).rows[0],
+    all: async (text, params) => (await query(text, params)).rows,
+    run: async (text, params) => ({ changes: (await query(text, params)).rowCount }),
+    insert: async (text, params) => Number((await query(`${text} RETURNING id`, params)).rows[0].id),
+    columns: async (table) => (await pool.query('SELECT column_name FROM information_schema.columns WHERE table_name = $1', [table])).rows.map((r) => r.column_name),
+    close: () => pool.end(),
+  };
+}
+
+// Same calling style as before (sql(text).get(...)), but every call returns a promise.
+function sql(text) {
+  return {
+    get: (...p) => driver.get(text, p),
+    all: (...p) => driver.all(text, p),
+    run: (...p) => driver.run(text, p),
+    insert: (...p) => driver.insert(text, p), // returns the new row's id
+  };
+}
+
+// A UNIQUE / primary-key violation, on either database.
+const isUniqueError = (e) => e?.code === '23505' || /UNIQUE constraint/.test(e?.message || '');
+
+// Older SQLite databases (created by earlier versions of the portal) get any missing columns added.
+async function migrateSqlite() {
+  const add = async (table, col, type) => {
+    if (!(await driver.columns(table)).includes(col)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+  };
+  await add('users', 'status', "TEXT NOT NULL DEFAULT 'approved'");
+  await add('attempts', 'last_seq', 'INTEGER NOT NULL DEFAULT 0');
+  await add('attempts', 'timing', 'TEXT');
+  await add('attempts', 'sec_index', 'INTEGER NOT NULL DEFAULT 0');
+  await add('attempts', 'sec_started_at', 'INTEGER');
+  await add('events', 'client_seq', 'INTEGER');
+  await add('sections', 'minutes', 'INTEGER');
+  await add('questions', 'marks', 'REAL NOT NULL DEFAULT 4');
+  await add('questions', 'negative', 'REAL NOT NULL DEFAULT 1');
+}
+
+async function init() {
+  if (driver) return;
+  driver = DRIVER === 'pg' ? pgDriver() : sqliteDriver();
+  if (DRIVER === 'sqlite') {
+    // An existing database may predate some columns: create missing tables, add columns, then indexes.
+    const ddl = schema('sqlite');
+    const [tables, indexes] = [ddl.split('-- Indexes for the hot paths')[0], ddl.split('-- Indexes for the hot paths')[1]];
+    await driver.exec(tables.replace(/CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username[^;]+;/, ''));
+    await migrateSqlite();
+    await driver.exec(`-- ${indexes}`);
+    // older databases already enforce unique usernames on the column itself
+    try { await driver.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (username)'); } catch { /* exists */ }
+  } else {
+    await driver.exec(schema('pg'));
+  }
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+    await sql('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING').run(k, v);
+  }
+  // Warning limit is capped at 3; older databases may still hold a higher value.
+  await sql("UPDATE settings SET value = '3' WHERE key = 'max_violations' AND (CAST(value AS INTEGER) > 3 OR CAST(value AS INTEGER) < 1)").run();
+  await loadSettings();
+}
+
+// ---------- settings (cached in memory; this process is the only writer) ----------
+let settingsMap = {};
 let settingsCache = null;
+
+async function loadSettings() {
+  settingsMap = {};
+  for (const row of await sql('SELECT key, value FROM settings').all()) settingsMap[row.key] = row.value;
+  settingsCache = null;
+}
 
 function getSettings() {
   if (settingsCache) return settingsCache;
-  const map = {};
-  for (const row of db.prepare('SELECT key, value FROM settings').all()) map[row.key] = row.value;
+  const map = settingsMap;
   settingsCache = Object.freeze({
     examOpen: map.exam_open === '1',
     registrationOpen: map.registration_open === '1',
@@ -154,19 +307,12 @@ function getSettings() {
   return settingsCache;
 }
 
-function setSetting(key, value) {
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(key, String(value));
+async function setSetting(key, value) {
+  await sql('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, String(value));
+  settingsMap = { ...settingsMap, [key]: String(value) };
   settingsCache = null;
 }
 
-// Prepared statements are compiled once and reused: re-preparing on every request
-// was the largest CPU cost when 1000 students start at once.
-const statements = new Map();
-function sql(text) {
-  let st = statements.get(text);
-  if (!st) statements.set(text, (st = db.prepare(text)));
-  return st;
-}
+const close = () => driver?.close();
 
-module.exports = { db, sql, DATA_DIR, SNAPSHOT_DIR, getSettings, setSetting };
+module.exports = { DATA_DIR, DRIVER, init, sql, isUniqueError, getSettings, setSetting, close };

@@ -1,35 +1,14 @@
 'use strict';
 // Question bank and its sections, stored in the database and managed from the admin dashboard.
 // On first run it is seeded from questions-data.js. Answers and solutions never go to students.
-const { db, sql } = require('./db');
+// The bank is held in memory (loadBank) and reloaded after every change, so reading it is instant.
+const { sql } = require('./db');
 
 const LETTERS = ['a', 'b', 'c', 'd'];
 // Default marking; every question can override it (marks for a correct answer, negative for a wrong one).
 const MARK_CORRECT = 4;
 const MARK_WRONG = -1;
 const round2 = (n) => Math.round(n * 100) / 100;
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sections (
-    key      TEXT PRIMARY KEY,
-    name     TEXT NOT NULL,
-    prefix   TEXT NOT NULL UNIQUE,   -- used for question ids, e.g. "ML" -> ML1, ML2
-    position INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS questions (
-    id         TEXT PRIMARY KEY,
-    section    TEXT NOT NULL,
-    position   INTEGER NOT NULL,
-    stem       TEXT NOT NULL,
-    code       TEXT,          -- JSON array of code lines, or NULL
-    sub        TEXT,          -- JSON array of sub-points, or NULL
-    options    TEXT NOT NULL, -- JSON array of exactly 4 options
-    answer     INTEGER NOT NULL CHECK (answer BETWEEN 0 AND 3),
-    solution   TEXT,          -- JSON array of solution lines
-    updated_at INTEGER NOT NULL
-  );
-`);
 
 const DEFAULT_SECTIONS = [
   { key: 'A', prefix: 'A', name: 'Python Programming' },
@@ -39,33 +18,27 @@ const DEFAULT_SECTIONS = [
   { key: 'C', prefix: 'C', name: 'Aptitude & Reasoning' },
 ];
 
-// Minutes allowed for the section when the exam uses per-section timing (NULL = not set).
-if (!db.prepare('PRAGMA table_info(sections)').all().some((c) => c.name === 'minutes')) {
-  db.exec('ALTER TABLE sections ADD COLUMN minutes INTEGER');
-}
-
-if (sql('SELECT COUNT(*) AS n FROM sections').get().n === 0) {
-  DEFAULT_SECTIONS.forEach((s, i) => sql('INSERT INTO sections (key, name, prefix, position) VALUES (?, ?, ?, ?)').run(s.key, s.name, s.prefix, i));
-}
-
-if (sql('SELECT COUNT(*) AS n FROM questions').get().n === 0) {
-  const seed = require('./questions-data');
-  const bySection = { A: seed.secA, B1: seed.secML, B2: seed.secGA, B3: seed.secAG, C: seed.secC };
-  const insert = sql(`INSERT INTO questions (id, section, position, stem, code, sub, options, answer, solution, updated_at)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  let position = 0;
-  for (const def of DEFAULT_SECTIONS) {
-    for (const q of bySection[def.key] || []) {
-      insert.run(q.id, def.key, position++, q.q, q.code ? JSON.stringify(q.code) : null, q.sub ? JSON.stringify(q.sub) : null,
-        JSON.stringify(q.o), LETTERS.indexOf(q.a), JSON.stringify(q.s || []), Date.now());
+// First run: create the default sections and fill them from questions-data.js.
+async function seed() {
+  if ((await sql('SELECT COUNT(*) AS n FROM sections').get()).n === 0) {
+    for (const [i, x] of DEFAULT_SECTIONS.entries()) {
+      await sql('INSERT INTO sections (key, name, prefix, position) VALUES (?, ?, ?, ?)').run(x.key, x.name, x.prefix, i);
     }
   }
-}
-
-for (const [col, def] of [['marks', MARK_CORRECT], ['negative', -MARK_WRONG]]) {
-  if (!db.prepare('PRAGMA table_info(questions)').all().some((c) => c.name === col)) {
-    db.exec(`ALTER TABLE questions ADD COLUMN ${col} REAL NOT NULL DEFAULT ${def}`);
+  if ((await sql('SELECT COUNT(*) AS n FROM questions').get()).n === 0) {
+    const data = require('./questions-data');
+    const bySection = { A: data.secA, B1: data.secML, B2: data.secGA, B3: data.secAG, C: data.secC };
+    const insert = sql(`INSERT INTO questions (id, section, position, stem, code, sub, options, answer, solution, updated_at, marks, negative)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    let position = 0;
+    for (const def of DEFAULT_SECTIONS) {
+      for (const q of bySection[def.key] || []) {
+        await insert.run(q.id, def.key, position++, q.q, q.code ? JSON.stringify(q.code) : null, q.sub ? JSON.stringify(q.sub) : null,
+          JSON.stringify(q.o), LETTERS.indexOf(q.a), JSON.stringify(q.s || []), Date.now(), MARK_CORRECT, -MARK_WRONG);
+      }
+    }
   }
+  await loadBank();
 }
 
 const parse = (s) => (s ? JSON.parse(s) : null);
@@ -79,16 +52,19 @@ function rowToQuestion(r) {
 }
 
 let cache = null;
-const invalidate = () => { cache = null; };
 
 // Current bank: sections in their order with their questions, lookup by id, and max score.
 function bank() {
-  if (cache) return cache;
-  const SECTIONS = sql('SELECT key, name, prefix, minutes FROM sections ORDER BY position, key').all()
+  if (!cache) throw new Error('Question bank not loaded');
+  return cache;
+}
+
+async function loadBank() {
+  const SECTIONS = (await sql('SELECT key, name, prefix, minutes FROM sections ORDER BY position, key').all())
     .map((s) => ({ key: s.key, title: s.name, prefix: s.prefix, minutes: s.minutes || null, items: [] }));
   const byKey = new Map(SECTIONS.map((s) => [s.key, s]));
   const BY_ID = new Map();
-  for (const r of sql('SELECT * FROM questions ORDER BY position, id').all()) {
+  for (const r of await sql('SELECT * FROM questions ORDER BY position, id').all()) {
     const section = byKey.get(r.section);
     if (!section) continue;
     const q = rowToQuestion(r);
@@ -99,6 +75,7 @@ function bank() {
   cache = { SECTIONS, BY_ID, MAX_SCORE: round2(SECTIONS.reduce((t, sec) => t + sec.maxScore, 0)) };
   return cache;
 }
+const invalidate = loadBank;
 
 // ---------- questions ----------
 function validate(input) {
@@ -138,40 +115,40 @@ function validMarks(rawMarks, rawNegative) {
   return { marks: round2(marks), negative: round2(negative) };
 }
 
-function nextQuestionId(sectionKey) {
+async function nextQuestionId(sectionKey) {
   const prefix = bank().SECTIONS.find((s) => s.key === sectionKey).prefix;
   const re = new RegExp(`^${prefix}(\\d+)$`);
   let max = 0;
-  for (const { id } of sql('SELECT id FROM questions').all()) {
+  for (const { id } of await sql('SELECT id FROM questions').all()) {
     const m = re.exec(id);
     if (m) max = Math.max(max, Number(m[1]));
   }
   return `${prefix}${max + 1}`;
 }
 
-function createQuestion(v) {
-  const id = nextQuestionId(v.section);
-  const position = (sql('SELECT MAX(position) AS p FROM questions').get().p ?? -1) + 1;
-  sql(`INSERT INTO questions (id, section, position, stem, code, sub, options, answer, solution, updated_at, marks, negative)
+async function createQuestion(v) {
+  const id = await nextQuestionId(v.section);
+  const position = ((await sql('SELECT MAX(position) AS p FROM questions').get()).p ?? -1) + 1;
+  await sql(`INSERT INTO questions (id, section, position, stem, code, sub, options, answer, solution, updated_at, marks, negative)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, v.section, position, v.stem, v.code ? JSON.stringify(v.code) : null, v.sub ? JSON.stringify(v.sub) : null,
       JSON.stringify(v.options), v.answer, JSON.stringify(v.solution), Date.now(), v.marks, v.negative);
-  invalidate();
+  await invalidate();
   return id;
 }
 
-function updateQuestion(id, v) {
-  const r = sql(`UPDATE questions SET section = ?, stem = ?, code = ?, sub = ?, options = ?, answer = ?, solution = ?, updated_at = ?,
+async function updateQuestion(id, v) {
+  const r = await sql(`UPDATE questions SET section = ?, stem = ?, code = ?, sub = ?, options = ?, answer = ?, solution = ?, updated_at = ?,
                  marks = ?, negative = ? WHERE id = ?`)
     .run(v.section, v.stem, v.code ? JSON.stringify(v.code) : null, v.sub ? JSON.stringify(v.sub) : null,
       JSON.stringify(v.options), v.answer, JSON.stringify(v.solution), Date.now(), v.marks, v.negative, id);
-  invalidate();
+  await invalidate();
   return r.changes > 0;
 }
 
-function deleteQuestion(id) {
-  const r = sql('DELETE FROM questions WHERE id = ?').run(id);
-  invalidate();
+async function deleteQuestion(id) {
+  const r = await sql('DELETE FROM questions WHERE id = ?').run(id);
+  await invalidate();
   return r.changes > 0;
 }
 
@@ -185,8 +162,8 @@ function validSectionName(name) {
 }
 
 // Question-id prefix from the initials of the name, e.g. "Data Structures" -> "DS", kept unique.
-function makePrefix(name) {
-  const taken = new Set(sql('SELECT prefix FROM sections').all().map((r) => r.prefix));
+async function makePrefix(name) {
+  const taken = new Set((await sql('SELECT prefix FROM sections').all()).map((r) => r.prefix));
   const words = name.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
   let base = words.length > 1 ? words.map((w) => w[0]).join('').slice(0, 3) : (words[0] || 'S').slice(0, 3);
   if (/^\d/.test(base)) base = `S${base}`;
@@ -195,73 +172,73 @@ function makePrefix(name) {
   return prefix;
 }
 
-function createSection(rawName) {
+async function createSection(rawName) {
   const { name, error } = validSectionName(rawName);
   if (error) return { error };
-  const keys = new Set(sql('SELECT key FROM sections').all().map((r) => r.key));
+  const keys = new Set((await sql('SELECT key FROM sections').all()).map((r) => r.key));
   let n = keys.size + 1;
   while (keys.has(`S${n}`)) n++;
   const key = `S${n}`;
-  const position = (sql('SELECT MAX(position) AS p FROM sections').get().p ?? -1) + 1;
-  sql('INSERT INTO sections (key, name, prefix, position) VALUES (?, ?, ?, ?)').run(key, name, makePrefix(name), position);
-  invalidate();
+  const position = ((await sql('SELECT MAX(position) AS p FROM sections').get()).p ?? -1) + 1;
+  await sql('INSERT INTO sections (key, name, prefix, position) VALUES (?, ?, ?, ?)').run(key, name, await makePrefix(name), position);
+  await invalidate();
   return { key };
 }
 
-function renameSection(key, rawName) {
+async function renameSection(key, rawName) {
   const current = bank().SECTIONS.find((s) => s.key === key);
   if (!current) return { error: 'Section not found.', status: 404 };
   if (String(rawName || '').trim().toLowerCase() === current.title.toLowerCase()) return { ok: true };
   const { name, error } = validSectionName(rawName);
   if (error) return { error };
-  sql('UPDATE sections SET name = ? WHERE key = ?').run(name, key);
-  invalidate();
+  await sql('UPDATE sections SET name = ? WHERE key = ?').run(name, key);
+  await invalidate();
   return { ok: true };
 }
 
-function moveSection(key, dir) {
+async function moveSection(key, dir) {
   const list = bank().SECTIONS.map((s) => s.key);
   const i = list.indexOf(key);
   const j = i + (dir < 0 ? -1 : 1);
   if (i < 0) return { error: 'Section not found.', status: 404 };
   if (j < 0 || j >= list.length) return { ok: true };
   [list[i], list[j]] = [list[j], list[i]];
-  list.forEach((k, pos) => sql('UPDATE sections SET position = ? WHERE key = ?').run(pos, k));
-  invalidate();
+  for (const [pos, k] of list.entries()) await sql('UPDATE sections SET position = ? WHERE key = ?').run(pos, k);
+  await invalidate();
   return { ok: true };
 }
 
 // Set the same marking for every question in a section.
-function setSectionMarks(key, rawMarks, rawNegative) {
+async function setSectionMarks(key, rawMarks, rawNegative) {
   if (!bank().SECTIONS.some((s) => s.key === key)) return { error: 'Section not found.', status: 404 };
   const { marks, negative, error } = validMarks(rawMarks, rawNegative);
   if (error) return { error };
-  const changed = sql('UPDATE questions SET marks = ?, negative = ?, updated_at = ? WHERE section = ?').run(marks, negative, Date.now(), key).changes;
-  invalidate();
+  const changed = (await sql('UPDATE questions SET marks = ?, negative = ?, updated_at = ? WHERE section = ?').run(marks, negative, Date.now(), key)).changes;
+  await invalidate();
   return { ok: true, updated: changed };
 }
 
-function setSectionMinutes(key, minutes) {
+async function setSectionMinutes(key, minutes) {
   if (!bank().SECTIONS.some((s) => s.key === key)) return { error: 'Section not found.', status: 404 };
   if (minutes !== null && !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 600)) {
     return { error: 'Section time must be a whole number of minutes between 1 and 600.' };
   }
-  sql('UPDATE sections SET minutes = ? WHERE key = ?').run(minutes, key);
-  invalidate();
+  await sql('UPDATE sections SET minutes = ? WHERE key = ?').run(minutes, key);
+  await invalidate();
   return { ok: true };
 }
 
 // Deleting a section also deletes its questions.
-function deleteSection(key) {
+async function deleteSection(key) {
   if (!bank().SECTIONS.some((s) => s.key === key)) return { error: 'Section not found.', status: 404 };
-  const removed = sql('DELETE FROM questions WHERE section = ?').run(key).changes;
-  sql('DELETE FROM sections WHERE key = ?').run(key);
-  invalidate();
+  const removed = (await sql('DELETE FROM questions WHERE section = ?').run(key)).changes;
+  await sql('DELETE FROM sections WHERE key = ?').run(key);
+  await invalidate();
   return { ok: true, removedQuestions: removed };
 }
 
 module.exports = {
   LETTERS, MARK_CORRECT, MARK_WRONG,
-  bank, validate, createQuestion, updateQuestion, deleteQuestion,
+  seed, bank, validate, createQuestion, updateQuestion, deleteQuestion,
   createSection, renameSection, moveSection, deleteSection, setSectionMinutes, setSectionMarks,
 };

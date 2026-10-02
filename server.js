@@ -7,9 +7,11 @@ const { monitorEventLoopDelay } = require('perf_hooks');
 const express = require('express');
 const compression = require('compression');
 
-const { db, sql, SNAPSHOT_DIR, getSettings, setSetting } = require('./db');
+const db = require('./db');
+const { sql, isUniqueError, getSettings, setSetting } = db;
+const storage = require('./storage');
 const {
-  LETTERS, MARK_CORRECT, MARK_WRONG, bank, validate, createQuestion, updateQuestion, deleteQuestion,
+  LETTERS, MARK_CORRECT, MARK_WRONG, seed, bank, validate, createQuestion, updateQuestion, deleteQuestion,
   createSection, renameSection, moveSection, deleteSection, setSectionMinutes, setSectionMarks,
 } = require('./questions');
 const { hashPassword, verifyPassword, generatePassword } = require('./auth');
@@ -38,7 +40,23 @@ const SUBMIT_REASONS = {
 
 const app = express();
 app.disable('x-powered-by');
-// Number of proxies in front of the app: 1 on Render alone, 2 when Vercel forwards /api to Render.
+
+// Express 4 does not catch errors thrown by async handlers; send them to the error handler instead.
+function catchAsync(router) {
+  for (const m of ['get', 'post', 'put', 'delete']) {
+    const orig = router[m].bind(router);
+    router[m] = (route, ...handlers) => {
+      if (!handlers.length) return orig(route); // app.get('setting')
+      const wrap = (h) => (Array.isArray(h) ? h.map(wrap)
+        : typeof h === 'function' && h.length < 4 ? (req, res, next) => { try { const r = h(req, res, next); if (r && typeof r.catch === 'function') r.catch(next); } catch (e) { next(e); } }
+          : h);
+      return orig(route, ...handlers.map(wrap));
+    };
+  }
+  return router;
+}
+catchAsync(app);
+// Number of proxies in front of the app: 1 on Azure App Service or Render alone, 2 when Vercel / Static Web Apps forwards /api.
 if (Number(process.env.TRUST_PROXY) > 0) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 // Server-side timing per route plus event-loop delay, exposed to admins at /api/admin/metrics.
 const loopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -91,21 +109,43 @@ function setSessionCookie(res, token, maxAgeSec) {
     `sid=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${maxAgeSec}${COOKIE_SECURE ? '; Secure' : ''}`);
 }
 
-function sessionUser(req) {
+async function sessionUser(req) {
   const token = parseCookies(req.headers.cookie).sid;
   if (!token) return null;
-  return sql(`
+  return await sql(`
     SELECT u.id, u.username, u.name, u.role, u.status FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?`).get(sha256(token), now()) || null;
 }
 
-const requireRole = (role) => (req, res, next) => {
-  const user = sessionUser(req);
+const requireRole = (role) => (req, res, next) => sessionUser(req).then((user) => {
   if (!user) return res.status(401).json({ error: 'Please log in.' });
   if (user.role !== role) return res.status(403).json({ error: 'You do not have access to this.' });
   req.user = user;
   next();
-};
+}, next);
+
+// A student's exam requests are handled one at a time, in order. Database calls are asynchronous, so
+// without this two requests from the same student (e.g. an answer save and a warning) could interleave
+// and lose an update. Different students still run fully in parallel.
+const userQueues = new Map(); // userId -> promise that settles when that student's last request is done
+function oneAtATime(req, res, next) {
+  const id = req.user.id;
+  const prev = userQueues.get(id) || Promise.resolve();
+  let release;
+  const mine = new Promise((r) => { release = r; });
+  const tail = prev.then(() => mine);
+  userQueues.set(id, tail);
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    release();
+    if (userQueues.get(id) === tail) userQueues.delete(id);
+  };
+  res.once('finish', finish);
+  res.once('close', finish);
+  prev.then(() => next());
+}
 
 // Students can sign in while their registration is pending, but can't touch the exam until approved.
 // Token bucket per student: normal use is a request every few seconds; a script flooding the
@@ -123,13 +163,15 @@ function rateLimited(userId) {
   return limited;
 }
 
-const requireApprovedStudent = [requireRole('student'), (req, res, next) => {
+const approvedStudent = [requireRole('student'), (req, res, next) => {
   if (req.user.status !== 'approved') {
     return res.status(403).json({ error: 'Your registration has not been approved yet.', approval: req.user.status });
   }
   if (rateLimited(req.user.id)) return res.status(429).json({ error: 'Too many requests. Slow down.' });
   next();
 }];
+// Requests that change the student's attempt also take their turn in the student's queue.
+const requireApprovedStudent = [...approvedStudent, oneAtATime];
 
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -144,19 +186,18 @@ function buildLayout() {
   return bank().SECTIONS.flatMap((s) => shuffle(s.items.map((q) => q.id)).map((id) => ({ id, perm: shuffle([0, 1, 2, 3]) })));
 }
 
-function logEvent(attemptId, type, detail, counted, clientSeq = null) {
-  sql('INSERT INTO events (attempt_id, type, detail, counted, at, client_seq) VALUES (?, ?, ?, ?, ?, ?)')
+async function logEvent(attemptId, type, detail, counted, clientSeq = null) {
+  await sql('INSERT INTO events (attempt_id, type, detail, counted, at, client_seq) VALUES (?, ?, ?, ?, ?, ?)')
     .run(attemptId, type, detail || null, counted ? 1 : 0, now(), clientSeq);
 }
 
 // Records a warning and auto-submits the attempt once the limit is reached.
-function addViolation(att, type, detail, clientSeq = null) {
-  logEvent(att.id, type, detail, true, clientSeq);
-  sql('UPDATE attempts SET violations = violations + 1 WHERE id = ?').run(att.id);
-  const violations = att.violations + 1;
+async function addViolation(att, type, detail, clientSeq = null) {
+  await logEvent(att.id, type, detail, true, clientSeq);
+  const { violations } = await sql('UPDATE attempts SET violations = violations + 1 WHERE id = ? RETURNING violations').get(att.id);
   const { maxViolations } = getSettings();
   const terminated = maxViolations > 0 && violations >= maxViolations;
-  if (terminated) finalize(att.id, 'violations');
+  if (terminated) await finalize(att.id, 'violations');
   return { violations, maxViolations, terminated };
 }
 
@@ -177,14 +218,15 @@ function scoreAnswers(answers) {
   return { total: round2(total), sections };
 }
 
-function finalize(attemptId, reason) {
-  const att = sql('SELECT * FROM attempts WHERE id = ?').get(attemptId);
+async function finalize(attemptId, reason) {
+  const att = await sql('SELECT * FROM attempts WHERE id = ?').get(attemptId);
   if (!att || att.status !== 'in_progress') return;
   const { total, sections } = scoreAnswers(parseJSON(att.answers, {}));
-  sql(`UPDATE attempts SET status = 'submitted', submitted_at = ?, submit_reason = ?, score = ?, section_scores = ?
+  const { changes } = await sql(`UPDATE attempts SET status = 'submitted', submitted_at = ?, submit_reason = ?, score = ?, section_scores = ?
               WHERE id = ? AND status = 'in_progress'`)
     .run(now(), reason, total, JSON.stringify(sections), attemptId);
-  logEvent(attemptId, 'submitted', SUBMIT_REASONS[reason] || reason, false);
+  // the sweeper and the student's own request can both try; only the one that submitted logs it
+  if (changes) await logEvent(attemptId, 'submitted', SUBMIT_REASONS[reason] || reason, false);
 }
 
 // Returns the student's attempt, auto-submitting it first if the deadline (plus grace) has passed.
@@ -209,7 +251,7 @@ function effectiveDurationMin() {
   return nonEmptySections().reduce((t, x) => t + (x.minutes || 0), 0);
 }
 
-function syncSections(att) {
+async function syncSections(att) {
   const timing = parseJSON(att.timing, null);
   if (!timing || timing.mode !== 'section' || att.status !== 'in_progress') return null;
   const plan = timing.plan;
@@ -217,13 +259,13 @@ function syncSections(att) {
   let started = att.sec_started_at;
   let moved = false;
   while (i < plan.length - 1 && now() > started + plan[i].sec * 1000) {
-    logEvent(att.id, 'section_time_up', `Time ended for "${plan[i].title}"`, false);
+    await logEvent(att.id, 'section_time_up', `Time ended for "${plan[i].title}"`, false);
     started += plan[i].sec * 1000;
     i++;
     moved = true;
   }
   if (moved) {
-    sql('UPDATE attempts SET sec_index = ?, sec_started_at = ? WHERE id = ?').run(i, started, att.id);
+    await sql('UPDATE attempts SET sec_index = ?, sec_started_at = ? WHERE id = ?').run(i, started, att.id);
     att.sec_index = i;
     att.sec_started_at = started;
   }
@@ -239,18 +281,18 @@ function publicSection(sec) {
   };
 }
 
-function currentAttempt(userId) {
-  let att = sql('SELECT * FROM attempts WHERE user_id = ?').get(userId);
-  if (att && att.status === 'in_progress') att._sec = syncSections(att);
+async function currentAttempt(userId) {
+  let att = await sql('SELECT * FROM attempts WHERE user_id = ?').get(userId);
+  if (att && att.status === 'in_progress') att._sec = await syncSections(att);
   if (att && att.status === 'in_progress' && now() > att.deadline + GRACE_MS) {
-    finalize(att.id, 'time_up');
-    att = sql('SELECT * FROM attempts WHERE id = ?').get(att.id);
+    await finalize(att.id, 'time_up');
+    att = await sql('SELECT * FROM attempts WHERE id = ?').get(att.id);
   }
   return att || null;
 }
 
-function activeAttemptOr409(req, res) {
-  const att = currentAttempt(req.user.id);
+async function activeAttemptOr409(req, res) {
+  const att = await currentAttempt(req.user.id);
   if (!att) { res.status(404).json({ error: 'You have not started the exam.' }); return null; }
   if (att.status !== 'in_progress') { res.status(409).json({ error: 'Your exam has already been submitted.', submitted: true }); return null; }
   return att;
@@ -272,26 +314,27 @@ function studentState(att) {
   };
 }
 
-function removeSnapshotDir(attemptId) {
-  const dir = path.join(SNAPSHOT_DIR, String(attemptId));
-  snapshotDirs.delete(dir);
-  fs.rmSync(dir, { recursive: true, force: true });
+// Snapshots and audio clips of an attempt live under snapshots/<attemptId>/ in storage.
+const attemptFileKey = (attemptId, file) => `snapshots/${Number(attemptId)}/${path.basename(file)}`;
+async function removeSnapshotDir(attemptId) {
+  await storage.removePrefix(`snapshots/${Number(attemptId)}`).catch((e) => console.error('Could not remove files of attempt', attemptId, e.message));
 }
 
 // Sweep: auto-submit attempts whose time has run out even if the student's browser is gone,
 // and flag attempts whose camera/screen snapshots stopped arriving (e.g. monitoring was tampered with).
 const gapFlagged = new Map(); // `${attemptId}:${kind}` -> timestamp of the last snapshot already flagged
-setInterval(() => {
-  sql(`UPDATE uc_attempts SET status = 'submitted', submitted_at = deadline, submit_reason = 'time_up'
+let sweeping = false;
+async function sweep() {
+  await sql(`UPDATE uc_attempts SET status = 'submitted', submitted_at = deadline, submit_reason = 'time_up'
        WHERE status = 'in_progress' AND deadline < ?`).run(now() - GRACE_MS);
-  const expired = sql("SELECT id FROM attempts WHERE status = 'in_progress' AND deadline < ?").all(now() - GRACE_MS);
-  for (const { id } of expired) finalize(id, 'time_up');
-  sql('DELETE FROM sessions WHERE expires_at < ?').run(now());
+  const expired = await sql("SELECT id FROM attempts WHERE status = 'in_progress' AND deadline < ?").all(now() - GRACE_MS);
+  for (const { id } of expired) await finalize(id, 'time_up');
+  await sql('DELETE FROM sessions WHERE expires_at < ?').run(now());
 
   const gapMs = Math.max(90 * 1000, getSettings().snapshotIntervalSec * 3000);
-  const active = sql("SELECT id, started_at FROM attempts WHERE status = 'in_progress' AND started_at < ?").all(now() - gapMs);
+  const active = await sql("SELECT id, started_at FROM attempts WHERE status = 'in_progress' AND started_at < ?").all(now() - gapMs);
   const lastSnaps = new Map();
-  for (const r of sql(`SELECT s.attempt_id, s.kind, MAX(s.at) AS t FROM snapshots s JOIN attempts a ON a.id = s.attempt_id
+  for (const r of await sql(`SELECT s.attempt_id, s.kind, MAX(s.at) AS t FROM snapshots s JOIN attempts a ON a.id = s.attempt_id
                               WHERE a.status = 'in_progress' GROUP BY s.attempt_id, s.kind`).all()) {
     lastSnaps.set(`${r.attempt_id}:${r.kind}`, r.t);
   }
@@ -301,10 +344,15 @@ setInterval(() => {
       const last = lastSnaps.get(key) || att.started_at;
       if (now() - last > gapMs && gapFlagged.get(key) !== last) {
         gapFlagged.set(key, last);
-        logEvent(att.id, 'monitoring_gap', `No ${kind} snapshot received for over ${Math.round(gapMs / 1000)} s`, false);
+        await logEvent(att.id, 'monitoring_gap', `No ${kind} snapshot received for over ${Math.round(gapMs / 1000)} s`, false);
       }
     }
   }
+}
+setInterval(() => {
+  if (sweeping) return;
+  sweeping = true;
+  sweep().catch((e) => console.error('Sweep failed:', e.message)).finally(() => { sweeping = false; });
 }, 15 * 1000).unref();
 
 // ---------- pages ----------
@@ -326,18 +374,18 @@ function sendPage(res, name) {
 app.use('/static', express.static(path.join(__dirname, 'public', 'static'), { cacheControl: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 
 app.get('/favicon.ico', (req, res) => res.status(204).end());
-app.get('/', (req, res) => {
-  const user = sessionUser(req);
+app.get('/', async (req, res) => {
+  const user = await sessionUser(req);
   if (user) return res.redirect(user.role === 'admin' ? '/admin' : '/exam');
   sendPage(res, 'login.html');
 });
-app.get('/exam', (req, res) => {
-  const user = sessionUser(req);
+app.get('/exam', async (req, res) => {
+  const user = await sessionUser(req);
   if (!user || user.role !== 'student') return res.redirect('/');
   sendPage(res, 'exam.html');
 });
-app.get('/admin', (req, res) => {
-  const user = sessionUser(req);
+app.get('/admin', async (req, res) => {
+  const user = await sessionUser(req);
   if (!user || user.role !== 'admin') return res.redirect('/');
   sendPage(res, 'admin.html');
 });
@@ -345,7 +393,7 @@ app.get('/admin', (req, res) => {
 // ---------- auth ----------
 const loginFailures = new Map(); // `${ip}|${username}` -> { count, until }
 
-app.get('/healthz', (req, res) => res.json({ ok: true }));
+app.get('/healthz', async (req, res) => res.json({ ok: true }));
 
 // Express 4 does not catch rejected promises, so async handlers are wrapped.
 const safe = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -359,7 +407,7 @@ app.post('/api/login', safe(async (req, res) => {
     return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
   }
 
-  const user = username && sql('SELECT * FROM users WHERE username = ?').get(username);
+  const user = username && await sql('SELECT * FROM users WHERE lower(username) = lower(?)').get(username);
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     const count = (f && f.until > now() ? f.count : 0) + 1;
     loginFailures.set(key, { count, until: now() + LOGIN_LOCK_MS });
@@ -372,14 +420,14 @@ app.post('/api/login', safe(async (req, res) => {
 
   // A student may be logged in on only one device at a time; a new login closes the old session.
   if (user.role === 'student') {
-    const hadSession = sql('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?').get(user.id, now()).n > 0;
-    sql('DELETE FROM sessions WHERE user_id = ?').run(user.id);
-    const att = sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(user.id);
-    if (att && hadSession) logEvent(att.id, 'new_login', `Logged in again from ${req.ip}; the previous session was closed`, false);
+    const hadSession = (await sql('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?').get(user.id, now())).n > 0;
+    await sql('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+    const att = await sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(user.id);
+    if (att && hadSession) await logEvent(att.id, 'new_login', `Logged in again from ${req.ip}; the previous session was closed`, false);
   }
 
   const token = crypto.randomBytes(32).toString('hex');
-  sql('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(sha256(token), user.id, now() + SESSION_MS);
+  await sql('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(sha256(token), user.id, now() + SESSION_MS);
   setSessionCookie(res, token, SESSION_MS / 1000);
   res.json({ role: user.role });
 }));
@@ -401,28 +449,28 @@ app.post('/api/register', safe(async (req, res) => {
   if (!USERNAME_RE.test(username)) return res.status(400).json({ error: 'Enter your roll number (2–40 letters or digits; . _ - allowed).' });
   if (name.length < 2 || name.length > 100) return res.status(400).json({ error: 'Enter your full name.' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
-  if (sql('SELECT 1 FROM users WHERE username = ?').get(username)) {
+  if (await sql('SELECT 1 FROM users WHERE lower(username) = lower(?)').get(username)) {
     return res.status(409).json({ error: 'This roll number is already registered. Sign in instead, or contact the examiner.' });
   }
 
   const passwordHash = await hashPassword(password);
-  let created;
+  let userId;
   try {
-    created = sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'pending', ?)")
-      .run(username, name, passwordHash, now());
+    userId = await sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'pending', ?)")
+      .insert(username, name, passwordHash, now());
   } catch (e) {
-    if (/UNIQUE/.test(e.message)) return res.status(409).json({ error: 'This roll number is already registered. Sign in instead, or contact the examiner.' });
+    if (isUniqueError(e)) return res.status(409).json({ error: 'This roll number is already registered. Sign in instead, or contact the examiner.' });
     throw e;
   }
   registrations.set(req.ip, { count: (r && r.until > now() ? r.count : 0) + 1, until: now() + 3600 * 1000 });
 
   const token = crypto.randomBytes(32).toString('hex');
-  sql('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(sha256(token), created.lastInsertRowid, now() + SESSION_MS);
+  await sql('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(sha256(token), userId, now() + SESSION_MS);
   setSessionCookie(res, token, SESSION_MS / 1000);
   res.json({ role: 'student', status: 'pending' });
 }));
 
-app.get('/api/registration', (req, res) => {
+app.get('/api/registration', async (req, res) => {
   const st = getSettings();
   const { SECTIONS, BY_ID } = bank();
   res.json({
@@ -435,35 +483,35 @@ app.get('/api/registration', (req, res) => {
   });
 });
 
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
   const token = parseCookies(req.headers.cookie).sid;
-  if (token) sql('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+  if (token) await sql('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
   setSessionCookie(res, '', 0);
   res.json({ ok: true });
 });
 
-app.get('/api/me', (req, res) => {
-  const user = sessionUser(req);
+app.get('/api/me', async (req, res) => {
+  const user = await sessionUser(req);
   if (!user) return res.status(401).json({ error: 'Please log in.' });
   res.json({ username: user.username, name: user.name, role: user.role, status: user.status });
 });
 
 // ---------- student exam API (never returns scores or answer keys) ----------
-app.get('/api/exam/status', requireRole('student'), (req, res) => {
+app.get('/api/exam/status', requireRole('student'), oneAtATime, async (req, res) => {
   const s = getSettings();
   if (req.user.status !== 'approved') return res.json({ approval: req.user.status });
   if (s.examMode === 'usecase') return res.json({ approval: 'approved', mode: 'usecase' });
-  let att = currentAttempt(req.user.id);
+  let att = await currentAttempt(req.user.id);
   // Opening the exam page again mid-exam (reload, closed tab, crash) is a warning: otherwise a
   // student could reload to escape monitoring and browse freely on the pre-exam screen.
   if (att && att.status === 'in_progress') {
     const detail = `Exam page was reloaded or reopened from ${req.ip}`;
     // If a warning was just recorded (e.g. leaving fullscreen right before reloading), it's the same incident.
-    const recent = sql('SELECT 1 FROM events WHERE attempt_id = ? AND counted = 1 AND at > ?').get(att.id, now() - 10 * 1000);
-    if (recent) logEvent(att.id, 'page_reloaded', detail, false);
+    const recent = await sql('SELECT 1 FROM events WHERE attempt_id = ? AND counted = 1 AND at > ?').get(att.id, now() - 10 * 1000);
+    if (recent) await logEvent(att.id, 'page_reloaded', detail, false);
     else {
-      const v = addViolation(att, 'page_reloaded', detail);
-      if (v.terminated) att = currentAttempt(req.user.id);
+      const v = await addViolation(att, 'page_reloaded', detail);
+      if (v.terminated) att = await currentAttempt(req.user.id);
       else att.violations = v.violations;
     }
   }
@@ -483,9 +531,9 @@ app.get('/api/exam/status', requireRole('student'), (req, res) => {
   });
 });
 
-app.post('/api/exam/start', requireApprovedStudent, (req, res) => {
+app.post('/api/exam/start', requireApprovedStudent, async (req, res) => {
   const s = getSettings();
-  let att = currentAttempt(req.user.id);
+  let att = await currentAttempt(req.user.id);
   if (att && att.status === 'submitted') return res.status(409).json({ error: 'Your exam has already been submitted.', submitted: true });
 
   if (!att) {
@@ -501,15 +549,15 @@ app.post('/api/exam/start', requireApprovedStudent, (req, res) => {
       totalMs = plan.reduce((t2, p2) => t2 + p2.sec, 0) * 1000;
     }
     const t = now();
-    const r = sql(`INSERT INTO attempts (user_id, status, layout, started_at, deadline, ip, user_agent, timing, sec_index, sec_started_at)
+    const attemptId = await sql(`INSERT INTO attempts (user_id, status, layout, started_at, deadline, ip, user_agent, timing, sec_index, sec_started_at)
                           VALUES (?, 'in_progress', ?, ?, ?, ?, ?, ?, 0, ?)`)
-      .run(req.user.id, JSON.stringify(buildLayout()), t, t + totalMs, req.ip,
+      .insert(req.user.id, JSON.stringify(buildLayout()), t, t + totalMs, req.ip,
         String(req.headers['user-agent'] || '').slice(0, 300), timing, t);
-    att = sql('SELECT * FROM attempts WHERE id = ?').get(r.lastInsertRowid);
-    att._sec = syncSections(att);
-    logEvent(att.id, 'started', `Started from ${req.ip}`, false);
+    att = await sql('SELECT * FROM attempts WHERE id = ?').get(attemptId);
+    att._sec = await syncSections(att);
+    await logEvent(att.id, 'started', `Started from ${req.ip}`, false);
   } else {
-    logEvent(att.id, 'resumed', `Exam page reopened from ${req.ip}`, false);
+    await logEvent(att.id, 'resumed', `Exam page reopened from ${req.ip}`, false);
   }
 
   const layout = parseJSON(att.layout, []);
@@ -538,7 +586,7 @@ const lastMinorEvent = new Map(); // attemptId -> time of last non-counted event
 // De-duplication is per (seq, type), never a "highest seq seen" mark: a forged request with a huge seq
 // cannot make later real warnings look like duplicates, and pre-sending ids with a warning type only
 // adds warnings.
-function processEvents(att, events) {
+async function processEvents(att, events) {
   const { maxViolations } = getSettings();
   let result = { violations: att.violations, maxViolations, terminated: false };
   const acked = [];
@@ -548,39 +596,39 @@ function processEvents(att, events) {
     acked.push(e.seq);
     const type = String(e.type || '');
     if (!CLIENT_EVENTS.has(type)) continue;
-    if (sql('SELECT 1 FROM events WHERE attempt_id = ? AND client_seq = ? AND type = ?').get(att.id, e.seq, type)) continue;
+    if (await sql('SELECT 1 FROM events WHERE attempt_id = ? AND client_seq = ? AND type = ?').get(att.id, e.seq, type)) continue;
     const detail = String(e.detail || '').slice(0, 300);
     if (COUNTED_EVENTS.has(type)) {
-      result = addViolation(att, type, detail, e.seq);
+      result = await addViolation(att, type, detail, e.seq);
       att.violations = result.violations;
       if (result.terminated) break;
     } else if ((lastMinorEvent.get(att.id) || 0) <= now() - 2000) {
       lastMinorEvent.set(att.id, now());
-      logEvent(att.id, type, detail, false, e.seq);
+      await logEvent(att.id, type, detail, false, e.seq);
     }
   }
   return { ...result, acked };
 }
 
-app.post('/api/exam/heartbeat', requireApprovedStudent, (req, res) => {
-  const att = currentAttempt(req.user.id);
+app.post('/api/exam/heartbeat', requireApprovedStudent, async (req, res) => {
+  const att = await currentAttempt(req.user.id);
   if (!att) return res.json({ status: 'none' });
   if (att.status !== 'in_progress') return res.json({ status: att.status });
-  const ev = processEvents(att, req.body?.events);
+  const ev = await processEvents(att, req.body?.events);
   if (ev.terminated) return res.json({ status: 'submitted', ...ev });
   res.json({ ...studentState(att), ...ev });
 });
 
-app.post('/api/exam/event', requireApprovedStudent, (req, res) => {
-  const att = activeAttemptOr409(req, res);
+app.post('/api/exam/event', requireApprovedStudent, async (req, res) => {
+  const att = await activeAttemptOr409(req, res);
   if (!att) return;
-  res.json(processEvents(att, req.body?.events));
+  res.json(await processEvents(att, req.body?.events));
 });
 
-app.put('/api/exam/answer', requireApprovedStudent, (req, res) => {
-  const att = activeAttemptOr409(req, res);
+app.put('/api/exam/answer', requireApprovedStudent, async (req, res) => {
+  const att = await activeAttemptOr409(req, res);
   if (!att) return;
-  const ev = processEvents(att, req.body?.events);
+  const ev = await processEvents(att, req.body?.events);
   if (ev.terminated) return res.status(409).json({ error: 'Your exam has already been submitted.', submitted: true, ...ev });
   const { qid, choice } = req.body || {};
   const entry = parseJSON(att.layout, []).find((e) => e.id === qid);
@@ -596,13 +644,13 @@ app.put('/api/exam/answer', requireApprovedStudent, (req, res) => {
   if (choice === null) delete answers[qid];
   else if (Number.isInteger(choice) && choice >= 0 && choice < 4) answers[qid] = entry.perm[choice];
   else return res.status(400).json({ error: 'Invalid choice.', ...ev });
-  sql('UPDATE attempts SET answers = ? WHERE id = ?').run(JSON.stringify(answers), att.id);
+  await sql('UPDATE attempts SET answers = ? WHERE id = ?').run(JSON.stringify(answers), att.id);
   res.json({ ok: true, remainingSec: remainingSec(att), ...ev });
 });
 
 // Finish the current section early and move to the next one (the finished section is locked).
-app.post('/api/exam/next-section', requireApprovedStudent, (req, res) => {
-  const att = activeAttemptOr409(req, res);
+app.post('/api/exam/next-section', requireApprovedStudent, async (req, res) => {
+  const att = await activeAttemptOr409(req, res);
   if (!att) return;
   const sec = att._sec;
   if (!sec) return res.status(400).json({ error: 'This exam does not use section timers.' });
@@ -610,9 +658,9 @@ app.post('/api/exam/next-section', requireApprovedStudent, (req, res) => {
     const i = sec.index + 1;
     const t = now();
     const restMs = sec.plan.slice(i).reduce((sum, p2) => sum + p2.sec, 0) * 1000;
-    sql('UPDATE attempts SET sec_index = ?, sec_started_at = ?, deadline = ? WHERE id = ?').run(i, t, t + restMs, att.id);
-    logEvent(att.id, 'section_finished', `Finished "${sec.plan[sec.index].title}" and moved to "${sec.plan[i].title}"`, false);
-    const fresh = currentAttempt(req.user.id);
+    await sql('UPDATE attempts SET sec_index = ?, sec_started_at = ?, deadline = ? WHERE id = ?').run(i, t, t + restMs, att.id);
+    await logEvent(att.id, 'section_finished', `Finished "${sec.plan[sec.index].title}" and moved to "${sec.plan[i].title}"`, false);
+    const fresh = await currentAttempt(req.user.id);
     return res.json(studentState(fresh));
   }
   res.json(studentState(att)); // already moved on (e.g. time ran out) or last section
@@ -621,10 +669,9 @@ app.post('/api/exam/next-section', requireApprovedStudent, (req, res) => {
 const lastSnapshot = new Map(); // `${attemptId}:${kind}` -> time
 
 const JPEG_PREFIX = 'data:image/jpeg;base64,';
-const snapshotDirs = new Set(); // attempt folders already created
 
-app.post('/api/exam/snapshot', requireApprovedStudent, safe(async (req, res) => {
-  const att = activeAttemptOr409(req, res);
+app.post('/api/exam/snapshot', approvedStudent, safe(async (req, res) => {
+  const att = await activeAttemptOr409(req, res);
   if (!att) return;
   const kind = req.body?.kind;
   if (kind !== 'camera' && kind !== 'screen') return res.status(400).json({ error: 'Invalid kind.' });
@@ -637,64 +684,59 @@ app.post('/api/exam/snapshot', requireApprovedStudent, safe(async (req, res) => 
   if (buf.length > 1.5 * 1024 * 1024 || buf[0] !== 0xff || buf[1] !== 0xd8) return res.status(400).json({ error: 'Invalid image.' });
   lastSnapshot.set(key, now());
 
-  // Disk writes go through the thread pool so they never pause other students' requests.
-  const dir = path.join(SNAPSHOT_DIR, String(att.id));
-  if (!snapshotDirs.has(dir)) { await fs.promises.mkdir(dir, { recursive: true }); snapshotDirs.add(dir); }
   const file = `${now()}-${kind}.jpg`;
-  await fs.promises.writeFile(path.join(dir, file), buf);
-  sql('INSERT INTO snapshots (attempt_id, kind, file, at) VALUES (?, ?, ?, ?)').run(att.id, kind, file, now());
+  await storage.put(attemptFileKey(att.id, file), buf, 'image/jpeg');
+  await sql('INSERT INTO snapshots (attempt_id, kind, file, at) VALUES (?, ?, ?, ?)').run(att.id, kind, file, now());
   res.json({ ok: true });
 }));
 
 // Microphone clips (webm/ogg, a few seconds long) recorded when the browser detects speech or sound.
 const AUDIO_MAX_PER_ATTEMPT = 120;
 const lastAudio = new Map(); // attemptId -> time
-app.post('/api/exam/audio', requireApprovedStudent, express.raw({ type: ['audio/webm', 'audio/ogg'], limit: '1mb' }), safe(async (req, res) => {
-  const att = activeAttemptOr409(req, res);
+app.post('/api/exam/audio', approvedStudent, express.raw({ type: ['audio/webm', 'audio/ogg'], limit: '1mb' }), safe(async (req, res) => {
+  const att = await activeAttemptOr409(req, res);
   if (!att) return;
   const buf = req.body;
   const isWebm = Buffer.isBuffer(buf) && buf.length > 100 && buf.readUInt32BE(0) === 0x1a45dfa3;
   const isOgg = Buffer.isBuffer(buf) && buf.length > 100 && buf.subarray(0, 4).toString('latin1') === 'OggS';
   if (!isWebm && !isOgg) return res.status(400).json({ error: 'Invalid audio.' });
   if ((lastAudio.get(att.id) || 0) > now() - 10000) return res.json({ ok: true, skipped: true });
-  if (sql('SELECT COUNT(*) AS n FROM audio_clips WHERE attempt_id = ?').get(att.id).n >= AUDIO_MAX_PER_ATTEMPT) return res.json({ ok: true, skipped: true });
+  if ((await sql('SELECT COUNT(*) AS n FROM audio_clips WHERE attempt_id = ?').get(att.id)).n >= AUDIO_MAX_PER_ATTEMPT) return res.json({ ok: true, skipped: true });
   lastAudio.set(att.id, now());
-  const dir = path.join(SNAPSHOT_DIR, String(att.id));
-  if (!snapshotDirs.has(dir)) { await fs.promises.mkdir(dir, { recursive: true }); snapshotDirs.add(dir); }
   const file = `${now()}-audio.${isWebm ? 'webm' : 'ogg'}`;
-  await fs.promises.writeFile(path.join(dir, file), buf);
+  await storage.put(attemptFileKey(att.id, file), buf, isWebm ? 'audio/webm' : 'audio/ogg');
   const ms = Math.min(60000, Math.max(0, Number(req.get('X-Duration-Ms')) || 0)) || null;
-  sql('INSERT INTO audio_clips (attempt_id, file, duration_ms, at) VALUES (?, ?, ?, ?)').run(att.id, file, ms, now());
+  await sql('INSERT INTO audio_clips (attempt_id, file, duration_ms, at) VALUES (?, ?, ?, ?)').run(att.id, file, ms, now());
   res.json({ ok: true });
 }));
 
-app.post('/api/exam/submit', requireApprovedStudent, (req, res) => {
-  const att = currentAttempt(req.user.id);
+app.post('/api/exam/submit', requireApprovedStudent, async (req, res) => {
+  const att = await currentAttempt(req.user.id);
   if (!att) return res.status(404).json({ error: 'You have not started the exam.' });
-  if (att.status === 'in_progress' && !processEvents(att, req.body?.events).terminated) {
-    finalize(att.id, req.body?.reason === 'time_up' ? 'time_up' : 'submitted');
+  if (att.status === 'in_progress' && !(await processEvents(att, req.body?.events)).terminated) {
+    await finalize(att.id, req.body?.reason === 'time_up' ? 'time_up' : 'submitted');
   }
   res.json({ ok: true });
 });
 
 // ---------- admin API ----------
 // ---------- use-case round (candidate) ----------
-function currentUcAttempt(userId) {
-  let att = sql('SELECT * FROM uc_attempts WHERE user_id = ?').get(userId);
+async function currentUcAttempt(userId) {
+  let att = await sql('SELECT * FROM uc_attempts WHERE user_id = ?').get(userId);
   if (att && att.status === 'in_progress' && now() > att.deadline + GRACE_MS) {
-    sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = deadline, submit_reason = 'time_up' WHERE id = ? AND status = 'in_progress'").run(att.id);
-    att = sql('SELECT * FROM uc_attempts WHERE id = ?').get(att.id);
+    await sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = deadline, submit_reason = 'time_up' WHERE id = ? AND status = 'in_progress'").run(att.id);
+    att = await sql('SELECT * FROM uc_attempts WHERE id = ?').get(att.id);
   }
   return att || null;
 }
 
-function ucState(userId) {
+async function ucState(userId) {
   const s = getSettings();
-  const att = currentUcAttempt(userId);
-  const u = att && att.status === 'in_progress' && att.usecase_id ? uc.getUseCase(att.usecase_id) : null;
+  const att = await currentUcAttempt(userId);
+  const u = att && att.status === 'in_progress' && att.usecase_id ? await uc.getUseCase(att.usecase_id) : null;
   return {
     mode: s.examMode, examOpen: s.examOpen, durationMin: s.ucDurationMin, maxMarks: s.ucMaxMarks,
-    useCaseCount: uc.listUseCases().length,
+    useCaseCount: await uc.countUseCases(),
     status: att ? att.status : 'none',
     remainingSec: att && att.status === 'in_progress' ? Math.max(0, Math.ceil((att.deadline - now()) / 1000)) : null,
     submittedAt: att?.submitted_at || null,
@@ -703,61 +745,57 @@ function ucState(userId) {
   };
 }
 
-app.get('/api/usecase/state', requireApprovedStudent, (req, res) => res.json(ucState(req.user.id)));
+app.get('/api/usecase/state', approvedStudent, async (req, res) => res.json(await ucState(req.user.id)));
 
-app.post('/api/usecase/start', requireApprovedStudent, (req, res) => {
+app.post('/api/usecase/start', requireApprovedStudent, async (req, res) => {
   const s = getSettings();
   if (s.examMode !== 'usecase') return res.status(409).json({ error: 'The use-case round is not active.' });
-  const existing = currentUcAttempt(req.user.id);
+  const existing = await currentUcAttempt(req.user.id);
   if (existing?.status === 'submitted') return res.status(409).json({ error: 'You have already submitted your solution.', submitted: true });
   if (!existing) {
     if (!s.examOpen) return res.status(403).json({ error: 'The test has not been opened yet.' });
-    const pick = uc.pickUseCase();
+    const pick = await uc.pickUseCase();
     if (!pick) return res.status(409).json({ error: 'No use cases are available yet. Please contact the examination authority.' });
     const t = now();
     try {
-      sql("INSERT INTO uc_attempts (user_id, usecase_id, status, started_at, deadline, ip) VALUES (?, ?, 'in_progress', ?, ?, ?)")
+      await sql("INSERT INTO uc_attempts (user_id, usecase_id, status, started_at, deadline, ip) VALUES (?, ?, 'in_progress', ?, ?, ?)")
         .run(req.user.id, pick, t, t + s.ucDurationMin * 60 * 1000, req.ip);
     } catch (e) {
-      if (!/UNIQUE/.test(e.message)) throw e; // double click: the first request already created it
+      if (!isUniqueError(e)) throw e; // double click: the first request already created it
     }
   }
-  res.json(ucState(req.user.id));
+  res.json(await ucState(req.user.id));
 });
 
 // The assigned PDF, shown inside the test page (same-origin framing allowed for this response only).
-app.get('/api/usecase/pdf', requireApprovedStudent, (req, res) => {
-  const att = currentUcAttempt(req.user.id);
-  const u = att && att.usecase_id ? uc.getUseCase(att.usecase_id) : null;
-  if (!u || !u.pdf_name || !fs.existsSync(uc.pdfPath(u.id))) return res.status(404).json({ error: 'No document is attached.' });
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${u.pdf_name.replace(/"/g, '')}"`);
-  res.sendFile(uc.pdfPath(u.id));
+app.get('/api/usecase/pdf', approvedStudent, async (req, res) => {
+  const att = await currentUcAttempt(req.user.id);
+  const u = att && att.usecase_id ? await uc.getUseCase(att.usecase_id) : null;
+  const sent = await uc.sendPdf(res, u, { 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "frame-ancestors 'self'" });
+  if (!sent) res.status(404).json({ error: 'No document is attached.' });
 });
 
-app.post('/api/usecase/submit', requireApprovedStudent, (req, res) => {
-  const att = currentUcAttempt(req.user.id);
+app.post('/api/usecase/submit', requireApprovedStudent, async (req, res) => {
+  const att = await currentUcAttempt(req.user.id);
   if (!att) return res.status(404).json({ error: 'You have not started the test.' });
   if (att.status === 'submitted') return res.status(409).json({ error: 'You have already submitted your solution.', submitted: true });
   // Without a link, the attempt can only be closed once the time is (almost) over.
   if (req.body?.url === null && req.body?.reason === 'time_up' && now() >= att.deadline - 5000) {
-    sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = 'time_up' WHERE id = ? AND status = 'in_progress'").run(now(), att.id);
-    return res.json(ucState(req.user.id));
+    await sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = 'time_up' WHERE id = ? AND status = 'in_progress'").run(now(), att.id);
+    return res.json(await ucState(req.user.id));
   }
   const { url, error } = uc.validUrl(req.body?.url);
   if (error) return res.status(400).json({ error });
-  sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = ?, url = ? WHERE id = ? AND status = 'in_progress'")
+  await sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = ?, url = ? WHERE id = ? AND status = 'in_progress'")
     .run(now(), req.body?.reason === 'time_up' ? 'time_up' : 'submitted', url, att.id);
-  res.json(ucState(req.user.id));
+  res.json(await ucState(req.user.id));
 });
 
-const admin = express.Router();
+const admin = catchAsync(express.Router());
 admin.use(requireRole('admin'));
 
-admin.get('/summary', (req, res) => {
-  const rows = sql(`
+admin.get('/summary', async (req, res) => {
+  const rows = await sql(`
     SELECT u.id, u.username, u.name, u.status AS approval, u.created_at,
            a.id AS attempt_id, a.status, a.score, a.section_scores, a.violations,
            a.started_at, a.submitted_at, a.submit_reason, a.deadline,
@@ -783,10 +821,10 @@ admin.get('/summary', (req, res) => {
   });
 });
 
-admin.get('/students/:id', (req, res) => {
-  const user = sql("SELECT id, username, name FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
+admin.get('/students/:id', async (req, res) => {
+  const user = await sql("SELECT id, username, name FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
   if (!user) return res.status(404).json({ error: 'Student not found.' });
-  const att = currentAttempt(user.id);
+  const att = await currentAttempt(user.id);
   if (!att) return res.json({ user, attempt: null });
 
   const answers = parseJSON(att.answers, {});
@@ -814,29 +852,26 @@ admin.get('/students/:id', (req, res) => {
     },
     letters: LETTERS,
     review,
-    events: sql('SELECT type, detail, counted, at FROM events WHERE attempt_id = ? ORDER BY at').all(att.id),
-    snapshots: sql('SELECT id, kind, at FROM snapshots WHERE attempt_id = ? ORDER BY at').all(att.id),
-    audio: sql('SELECT id, duration_ms AS durationMs, at FROM audio_clips WHERE attempt_id = ? ORDER BY at').all(att.id),
+    events: await sql('SELECT type, detail, counted, at FROM events WHERE attempt_id = ? ORDER BY at').all(att.id),
+    snapshots: await sql('SELECT id, kind, at FROM snapshots WHERE attempt_id = ? ORDER BY at').all(att.id),
+    audio: await sql('SELECT id, duration_ms AS "durationMs", at FROM audio_clips WHERE attempt_id = ? ORDER BY at').all(att.id),
   });
 });
 
-admin.get('/audio/:id', (req, res) => {
-  const clip = sql('SELECT attempt_id, file FROM audio_clips WHERE id = ?').get(Number(req.params.id));
+admin.get('/audio/:id', async (req, res) => {
+  const clip = await sql('SELECT attempt_id, file FROM audio_clips WHERE id = ?').get(Number(req.params.id));
   if (!clip) return res.status(404).end();
-  const file = path.join(SNAPSHOT_DIR, String(clip.attempt_id), path.basename(clip.file));
-  if (!fs.existsSync(file)) return res.status(404).end();
-  res.setHeader('Content-Type', clip.file.endsWith('.ogg') ? 'audio/ogg' : 'audio/webm');
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.sendFile(file);
+  const sent = await storage.send(res, attemptFileKey(clip.attempt_id, clip.file), {
+    'Content-Type': clip.file.endsWith('.ogg') ? 'audio/ogg' : 'audio/webm', 'Cache-Control': 'private, max-age=3600',
+  });
+  if (!sent) res.status(404).end();
 });
 
-admin.get('/snapshots/:id', (req, res) => {
-  const snap = sql('SELECT attempt_id, file FROM snapshots WHERE id = ?').get(Number(req.params.id));
+admin.get('/snapshots/:id', async (req, res) => {
+  const snap = await sql('SELECT attempt_id, file FROM snapshots WHERE id = ?').get(Number(req.params.id));
   if (!snap) return res.status(404).end();
-  const file = path.join(SNAPSHOT_DIR, String(snap.attempt_id), path.basename(snap.file));
-  if (!fs.existsSync(file)) return res.status(404).end();
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.sendFile(file);
+  const sent = await storage.send(res, attemptFileKey(snap.attempt_id, snap.file), { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' });
+  if (!sent) res.status(404).end();
 });
 
 // Admin-created students are approved immediately. A blank password gets a generated one,
@@ -855,18 +890,18 @@ admin.post('/students', safe(async (req, res) => {
     if (!USERNAME_RE.test(username)) { skipped.push({ username, reason: 'Invalid roll number (2–40 letters, digits, . _ -)' }); continue; }
     if (name.length < 2) { skipped.push({ username, reason: 'Name is required' }); continue; }
     if (password && password.length < 6) { skipped.push({ username, reason: 'Password must be at least 6 characters' }); continue; }
-    if (seen.has(username.toLowerCase()) || sql('SELECT 1 FROM users WHERE username = ?').get(username)) {
+    if (seen.has(username.toLowerCase()) || await sql('SELECT 1 FROM users WHERE lower(username) = lower(?)').get(username)) {
       skipped.push({ username, reason: 'Roll number already exists' });
       continue;
     }
     seen.add(username.toLowerCase());
     if (!password) password = generatePassword();
     try {
-      sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'approved', ?)")
+      await sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'approved', ?)")
         .run(username, name, await hashPassword(password), now());
       created.push({ username, name, password });
     } catch (e) {
-      if (/UNIQUE/.test(e.message)) skipped.push({ username, reason: 'Roll number already exists' });
+      if (isUniqueError(e)) skipped.push({ username, reason: 'Roll number already exists' });
       else throw e;
     }
   }
@@ -874,72 +909,72 @@ admin.post('/students', safe(async (req, res) => {
 }));
 
 // Approve or reject self-registered students.
-function setApproval(ids, status) {
+async function setApproval(ids, status) {
   const upd = sql("UPDATE users SET status = ? WHERE id = ? AND role = 'student'");
   let changed = 0;
-  for (const id of ids) changed += upd.run(status, id).changes;
+  for (const id of ids) changed += (await upd.run(status, id)).changes;
   if (status === 'rejected') {
     const del = sql('DELETE FROM sessions WHERE user_id = ?');
-    for (const id of ids) del.run(id);
+    for (const id of ids) await del.run(id);
   }
   return changed;
 }
 
-admin.post('/students/:id/approve', (req, res) => {
-  if (!setApproval([Number(req.params.id)], 'approved')) return res.status(404).json({ error: 'Student not found.' });
+admin.post('/students/:id/approve', async (req, res) => {
+  if (!await setApproval([Number(req.params.id)], 'approved')) return res.status(404).json({ error: 'Student not found.' });
   res.json({ ok: true });
 });
 
-admin.post('/students/:id/reject', (req, res) => {
-  if (!setApproval([Number(req.params.id)], 'rejected')) return res.status(404).json({ error: 'Student not found.' });
+admin.post('/students/:id/reject', async (req, res) => {
+  if (!await setApproval([Number(req.params.id)], 'rejected')) return res.status(404).json({ error: 'Student not found.' });
   res.json({ ok: true });
 });
 
-admin.post('/students/approve-all', (req, res) => {
-  const ids = sql("SELECT id FROM users WHERE role = 'student' AND status = 'pending'").all().map((r) => r.id);
-  res.json({ approved: setApproval(ids, 'approved') });
+admin.post('/students/approve-all', async (req, res) => {
+  const ids = (await sql("SELECT id FROM users WHERE role = 'student' AND status = 'pending'").all()).map((r) => r.id);
+  res.json({ approved: await setApproval(ids, 'approved') });
 });
 
 admin.post('/students/:id/password', safe(async (req, res) => {
-  const user = sql("SELECT id, username FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
+  const user = await sql("SELECT id, username FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
   if (!user) return res.status(404).json({ error: 'Student not found.' });
   let password = String(req.body?.password || '').trim();
   if (password && password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
   if (!password) password = generatePassword();
-  sql('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(password), user.id);
-  sql('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  await sql('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(password), user.id);
+  await sql('DELETE FROM sessions WHERE user_id = ?').run(user.id);
   res.json({ username: user.username, password });
 }));
 
-admin.post('/students/:id/reset-attempt', (req, res) => {
+admin.post('/students/:id/reset-attempt', async (req, res) => {
   if (getSettings().examMode === 'usecase') {
-    const r = sql('DELETE FROM uc_attempts WHERE user_id = ?').run(Number(req.params.id));
+    const r = await sql('DELETE FROM uc_attempts WHERE user_id = ?').run(Number(req.params.id));
     return r.changes ? res.json({ ok: true }) : res.status(404).json({ error: 'This candidate has no use-case attempt.' });
   }
-  const att = sql('SELECT id FROM attempts WHERE user_id = ?').get(Number(req.params.id));
+  const att = await sql('SELECT id FROM attempts WHERE user_id = ?').get(Number(req.params.id));
   if (!att) return res.status(404).json({ error: 'This student has no attempt.' });
-  sql('DELETE FROM attempts WHERE id = ?').run(att.id);
-  removeSnapshotDir(att.id);
+  await sql('DELETE FROM attempts WHERE id = ?').run(att.id);
+  await removeSnapshotDir(att.id);
   res.json({ ok: true });
 });
 
-admin.post('/students/:id/force-submit', (req, res) => {
-  const att = sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(Number(req.params.id));
+admin.post('/students/:id/force-submit', async (req, res) => {
+  const att = await sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(Number(req.params.id));
   if (!att) return res.status(404).json({ error: 'No exam in progress for this student.' });
-  finalize(att.id, 'admin');
+  await finalize(att.id, 'admin');
   res.json({ ok: true });
 });
 
-admin.delete('/students/:id', (req, res) => {
-  const user = sql("SELECT id FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
+admin.delete('/students/:id', async (req, res) => {
+  const user = await sql("SELECT id FROM users WHERE id = ? AND role = 'student'").get(Number(req.params.id));
   if (!user) return res.status(404).json({ error: 'Student not found.' });
-  const att = sql('SELECT id FROM attempts WHERE user_id = ?').get(user.id);
-  sql('DELETE FROM users WHERE id = ?').run(user.id);
-  if (att) removeSnapshotDir(att.id);
+  const att = await sql('SELECT id FROM attempts WHERE user_id = ?').get(user.id);
+  await sql('DELETE FROM users WHERE id = ?').run(user.id);
+  if (att) await removeSnapshotDir(att.id);
   res.json({ ok: true });
 });
 
-admin.get('/metrics', (req, res) => {
+admin.get('/metrics', async (req, res) => {
   const pct = (a, p) => (a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))] : 0);
   const routes = {};
   for (const [key, arr] of routeTimes) {
@@ -950,7 +985,7 @@ admin.get('/metrics', (req, res) => {
   const out = {
     uptimeSec: Math.round(process.uptime()),
     memoryMB: Math.round(process.memoryUsage().rss / 1048576),
-    liveAttempts: sql("SELECT COUNT(*) AS n FROM attempts WHERE status = 'in_progress'").get().n,
+    liveAttempts: await liveAttempts(),
     connections: { ...conn },
     eventLoopDelayMs: { p50: ms(loopDelay.percentile(50)), p99: ms(loopDelay.percentile(99)), max: ms(loopDelay.max) },
     routes,
@@ -959,39 +994,39 @@ admin.get('/metrics', (req, res) => {
   res.json(out);
 });
 
-admin.get('/settings', (req, res) => res.json(getSettings()));
+admin.get('/settings', async (req, res) => res.json(getSettings()));
 
-admin.put('/settings', (req, res) => {
+admin.put('/settings', async (req, res) => {
   const b = req.body || {};
   const errors = [];
   const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
-  if (b.examOpen !== undefined) setSetting('exam_open', b.examOpen ? '1' : '0');
-  if (b.registrationOpen !== undefined) setSetting('registration_open', b.registrationOpen ? '1' : '0');
-  if (b.durationMin !== undefined) intIn(b.durationMin, 1, 600) ? setSetting('duration_min', b.durationMin) : errors.push('Duration must be 1–600 minutes.');
-  if (b.maxViolations !== undefined) intIn(b.maxViolations, 1, MAX_WARNINGS) ? setSetting('max_violations', b.maxViolations) : errors.push(`Warning limit must be between 1 and ${MAX_WARNINGS}.`);
-  if (b.snapshotIntervalSec !== undefined) intIn(b.snapshotIntervalSec, 10, 600) ? setSetting('snapshot_interval_sec', b.snapshotIntervalSec) : errors.push('Snapshot interval must be 10–600 seconds.');
-  if (b.timingMode !== undefined) ['overall', 'section'].includes(b.timingMode) ? setSetting('timing_mode', b.timingMode) : errors.push('Unknown timing mode.');
+  if (b.examOpen !== undefined) await setSetting('exam_open', b.examOpen ? '1' : '0');
+  if (b.registrationOpen !== undefined) await setSetting('registration_open', b.registrationOpen ? '1' : '0');
+  if (b.durationMin !== undefined) intIn(b.durationMin, 1, 600) ? await setSetting('duration_min', b.durationMin) : errors.push('Duration must be 1–600 minutes.');
+  if (b.maxViolations !== undefined) intIn(b.maxViolations, 1, MAX_WARNINGS) ? await setSetting('max_violations', b.maxViolations) : errors.push(`Warning limit must be between 1 and ${MAX_WARNINGS}.`);
+  if (b.snapshotIntervalSec !== undefined) intIn(b.snapshotIntervalSec, 10, 600) ? await setSetting('snapshot_interval_sec', b.snapshotIntervalSec) : errors.push('Snapshot interval must be 10–600 seconds.');
+  if (b.timingMode !== undefined) ['overall', 'section'].includes(b.timingMode) ? await setSetting('timing_mode', b.timingMode) : errors.push('Unknown timing mode.');
   for (const [field, key, label] of [['orgName', 'org_name', 'Organisation name'], ['examName', 'exam_name', 'Examination name']]) {
     if (b[field] === undefined) continue;
     const v = String(b[field]).trim().replace(/\s+/g, ' ');
     if (!v || v.length > 80) errors.push(`${label} must be 1–80 characters.`);
-    else setSetting(key, v);
+    else await setSetting(key, v);
   }
-  const liveTests = () => sql("SELECT (SELECT COUNT(*) FROM attempts WHERE status = 'in_progress') + (SELECT COUNT(*) FROM uc_attempts WHERE status = 'in_progress') AS n").get().n;
+  const liveTests = async () => (await sql("SELECT (SELECT COUNT(*) FROM attempts WHERE status = 'in_progress') + (SELECT COUNT(*) FROM uc_attempts WHERE status = 'in_progress') AS n").get()).n;
   if (b.examMode !== undefined && b.examMode !== getSettings().examMode) {
     if (!['mcq', 'usecase'].includes(b.examMode)) errors.push('Unknown test type.');
-    else if (liveTests()) errors.push('Candidates are taking a test right now. The test type can be changed after they finish.');
-    else setSetting('exam_mode', b.examMode);
+    else if (await liveTests()) errors.push('Candidates are taking a test right now. The test type can be changed after they finish.');
+    else await setSetting('exam_mode', b.examMode);
   }
-  if (b.ucDurationMin !== undefined) intIn(b.ucDurationMin, 1, 600) ? setSetting('uc_duration_min', b.ucDurationMin) : errors.push('Use-case duration must be 1–600 minutes.');
-  if (b.ucMaxMarks !== undefined) intIn(b.ucMaxMarks, 1, 1000) ? setSetting('uc_max_marks', b.ucMaxMarks) : errors.push('Use-case maximum marks must be 1–1000.');
+  if (b.ucDurationMin !== undefined) intIn(b.ucDurationMin, 1, 600) ? await setSetting('uc_duration_min', b.ucDurationMin) : errors.push('Use-case duration must be 1–600 minutes.');
+  if (b.ucMaxMarks !== undefined) intIn(b.ucMaxMarks, 1, 1000) ? await setSetting('uc_max_marks', b.ucMaxMarks) : errors.push('Use-case maximum marks must be 1–1000.');
   const st = getSettings();
-  if (st.examMode === 'usecase' && st.examOpen && !uc.listUseCases().length) {
-    setSetting('exam_open', '0');
+  if (st.examMode === 'usecase' && st.examOpen && !(await uc.countUseCases())) {
+    await setSetting('exam_open', '0');
     errors.push('Add at least one use case before opening the use-case round. The test was kept closed.');
   }
   if (st.examMode === 'mcq' && st.timingMode === 'section' && st.examOpen && sectionTimesMissing().length) {
-    setSetting('exam_open', '0');
+    await setSetting('exam_open', '0');
     errors.push(`Set a time for every section before opening the exam (missing: ${sectionTimesMissing().join(', ')}). The exam was kept closed.`);
   }
   if (errors.length) return res.status(400).json({ error: errors.join(' ') });
@@ -1000,17 +1035,17 @@ admin.put('/settings', (req, res) => {
 
 // ---------- question bank ----------
 // Re-score submitted attempts so results stay correct after the admin edits questions or answers.
-function rescoreSubmitted() {
+async function rescoreSubmitted() {
   const upd = sql('UPDATE attempts SET score = ?, section_scores = ? WHERE id = ?');
-  for (const att of sql("SELECT id, answers FROM attempts WHERE status = 'submitted'").all()) {
+  for (const att of await sql("SELECT id, answers FROM attempts WHERE status = 'submitted'").all()) {
     const { total, sections } = scoreAnswers(parseJSON(att.answers, {}));
-    upd.run(total, JSON.stringify(sections), att.id);
+    await upd.run(total, JSON.stringify(sections), att.id);
   }
 }
 
-const liveAttempts = () => sql("SELECT COUNT(*) AS n FROM attempts WHERE status = 'in_progress'").get().n;
+const liveAttempts = async () => (await sql("SELECT COUNT(*) AS n FROM attempts WHERE status = 'in_progress'").get()).n;
 
-admin.get('/questions', (req, res) => {
+admin.get('/questions', async (req, res) => {
   const { SECTIONS } = bank();
   res.json({
     sections: bank().SECTIONS.map((sec) => ({ key: sec.key, title: sec.title, prefix: sec.prefix, minutes: sec.minutes, count: sec.items.length, maxScore: sec.maxScore })),
@@ -1019,69 +1054,69 @@ admin.get('/questions', (req, res) => {
       id: q.id, section: q.section, q: q.q, code: q.code, sub: q.sub, options: q.o, answer: q.correct, solution: q.s,
       marks: q.marks, negative: q.negative,
     }))),
-    liveAttempts: liveAttempts(),
+    liveAttempts: await liveAttempts(),
   });
 });
 
-admin.post('/questions', (req, res) => {
-  if (liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Add questions before or after the exam.' });
+admin.post('/questions', async (req, res) => {
+  if (await liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Add questions before or after the exam.' });
   const { errors, value } = validate(req.body);
   if (errors) return res.status(400).json({ error: errors.join(' ') });
-  const id = createQuestion(value);
-  rescoreSubmitted();
+  const id = await createQuestion(value);
+  await rescoreSubmitted();
   res.json({ id });
 });
 
-admin.put('/questions/:id', (req, res) => {
+admin.put('/questions/:id', async (req, res) => {
   const { errors, value } = validate(req.body);
   if (errors) return res.status(400).json({ error: errors.join(' ') });
   const current = bank().BY_ID.get(req.params.id);
   if (!current) return res.status(404).json({ error: 'Question not found.' });
-  if (current.section !== value.section && liveAttempts()) {
+  if (current.section !== value.section && await liveAttempts()) {
     return res.status(409).json({ error: 'Students are taking the exam right now, so a question cannot move to another section.' });
   }
-  updateQuestion(req.params.id, value);
-  rescoreSubmitted();
+  await updateQuestion(req.params.id, value);
+  await rescoreSubmitted();
   res.json({ ok: true });
 });
 
 // Sections: add, rename, reorder, delete (deleting also removes the section's questions).
 const sectionResult = (res, r) => (r.error ? res.status(r.status || 400).json({ error: r.error }) : res.json(r));
 
-admin.post('/sections', (req, res) => {
-  if (liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Add sections before or after the exam.' });
-  const r = createSection(req.body?.name);
-  if (!r.error) rescoreSubmitted();
+admin.post('/sections', async (req, res) => {
+  if (await liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Add sections before or after the exam.' });
+  const r = await createSection(req.body?.name);
+  if (!r.error) await rescoreSubmitted();
   sectionResult(res, r);
 });
 
-admin.put('/sections/:key', (req, res) => {
+admin.put('/sections/:key', async (req, res) => {
   if (req.body?.marks !== undefined || req.body?.negative !== undefined) {
-    const r = setSectionMarks(req.params.key, req.body.marks, req.body.negative);
-    if (!r.error) rescoreSubmitted();
+    const r = await setSectionMarks(req.params.key, req.body.marks, req.body.negative);
+    if (!r.error) await rescoreSubmitted();
     return sectionResult(res, r);
   }
   if (req.body?.minutes !== undefined) {
     const m = req.body.minutes === null || req.body.minutes === '' ? null : Number(req.body.minutes);
-    const r = setSectionMinutes(req.params.key, m);
+    const r = await setSectionMinutes(req.params.key, m);
     if (r.error || req.body?.name === undefined) return sectionResult(res, r);
   }
-  sectionResult(res, renameSection(req.params.key, req.body?.name));
+  sectionResult(res, await renameSection(req.params.key, req.body?.name));
 });
 
-admin.post('/sections/:key/move', (req, res) => sectionResult(res, moveSection(req.params.key, Number(req.body?.dir))));
+admin.post('/sections/:key/move', async (req, res) => sectionResult(res, await moveSection(req.params.key, Number(req.body?.dir))));
 
-admin.delete('/sections/:key', (req, res) => {
-  if (liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Delete sections before or after the exam.' });
-  const r = deleteSection(req.params.key);
-  if (!r.error) rescoreSubmitted();
+admin.delete('/sections/:key', async (req, res) => {
+  if (await liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Delete sections before or after the exam.' });
+  const r = await deleteSection(req.params.key);
+  if (!r.error) await rescoreSubmitted();
   sectionResult(res, r);
 });
 
-admin.delete('/questions/:id', (req, res) => {
-  if (liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Delete questions before or after the exam.' });
-  if (!deleteQuestion(req.params.id)) return res.status(404).json({ error: 'Question not found.' });
-  rescoreSubmitted();
+admin.delete('/questions/:id', async (req, res) => {
+  if (await liveAttempts()) return res.status(409).json({ error: 'Students are taking the exam right now. Delete questions before or after the exam.' });
+  if (!await deleteQuestion(req.params.id)) return res.status(404).json({ error: 'Question not found.' });
+  await rescoreSubmitted();
   res.json({ ok: true });
 });
 
@@ -1089,51 +1124,48 @@ admin.delete('/questions/:id', (req, res) => {
 const pdfBody = express.raw({ type: 'application/pdf', limit: '25mb' });
 const ucPublic = (u) => ({ id: u.id, title: u.title, description: u.description, pdfName: u.pdf_name, pdfSize: u.pdf_size, assigned: u.assigned ?? 0 });
 
-admin.get('/usecases', (req, res) => res.json({ usecases: uc.listUseCases().map(ucPublic), settings: getSettings() }));
+admin.get('/usecases', async (req, res) => res.json({ usecases: (await uc.listUseCases()).map(ucPublic), settings: getSettings() }));
 
-admin.post('/usecases', (req, res) => {
+admin.post('/usecases', async (req, res) => {
   const { value, error } = uc.validateUseCase(req.body);
   if (error) return res.status(400).json({ error });
-  res.json({ id: uc.createUseCase(value) });
+  res.json({ id: await uc.createUseCase(value) });
 });
 
-admin.put('/usecases/:id', (req, res) => {
+admin.put('/usecases/:id', async (req, res) => {
   const { value, error } = uc.validateUseCase(req.body);
   if (error) return res.status(400).json({ error });
-  if (!uc.updateUseCase(req.params.id, value)) return res.status(404).json({ error: 'Use case not found.' });
+  if (!await uc.updateUseCase(req.params.id, value)) return res.status(404).json({ error: 'Use case not found.' });
   res.json({ ok: true });
 });
 
-admin.delete('/usecases/:id', (req, res) => {
-  const r = uc.deleteUseCase(req.params.id);
+admin.delete('/usecases/:id', async (req, res) => {
+  const r = await uc.deleteUseCase(req.params.id);
   r.error ? res.status(r.status || 400).json({ error: r.error }) : res.json(r);
 });
 
-admin.put('/usecases/:id/pdf', pdfBody, (req, res) => {
-  const r = uc.savePdf(req.params.id, req.body, req.get('X-File-Name') ? decodeURIComponent(req.get('X-File-Name')) : 'use-case.pdf');
+admin.put('/usecases/:id/pdf', pdfBody, async (req, res) => {
+  const r = await uc.savePdf(req.params.id, req.body, req.get('X-File-Name') ? decodeURIComponent(req.get('X-File-Name')) : 'use-case.pdf');
   r.error ? res.status(r.status || 400).json({ error: r.error }) : res.json(r);
 });
 
-admin.delete('/usecases/:id/pdf', (req, res) => {
-  const r = uc.removePdf(req.params.id);
+admin.delete('/usecases/:id/pdf', async (req, res) => {
+  const r = await uc.removePdf(req.params.id);
   r.error ? res.status(r.status || 400).json({ error: r.error }) : res.json(r);
 });
 
-admin.get('/usecases/:id/pdf', (req, res) => {
-  const u = uc.getUseCase(req.params.id);
-  if (!u || !u.pdf_name || !fs.existsSync(uc.pdfPath(u.id))) return res.status(404).end();
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${u.pdf_name.replace(/"/g, '')}"`);
-  res.sendFile(uc.pdfPath(u.id));
+admin.get('/usecases/:id/pdf', async (req, res) => {
+  const u = await uc.getUseCase(req.params.id);
+  if (!(await uc.sendPdf(res, u))) res.status(404).end();
 });
 
 // Results of the use-case round, with evaluation.
-function ucResults() {
-  return sql(`
+async function ucResults() {
+  return (await sql(`
     SELECT u.id, u.username, u.name, ua.status, ua.started_at, ua.deadline, ua.submitted_at, ua.submit_reason,
            ua.url, ua.marks, ua.remarks, ua.evaluated_at, uc.title AS usecase
     FROM users u LEFT JOIN uc_attempts ua ON ua.user_id = u.id LEFT JOIN usecases uc ON uc.id = ua.usecase_id
-    WHERE u.role = 'student' AND u.status = 'approved' ORDER BY u.username`).all().map((r) => ({
+    WHERE u.role = 'student' AND u.status = 'approved' ORDER BY u.username`).all()).map((r) => ({
     id: r.id, username: r.username, name: r.name, status: r.status || 'not_started', usecase: r.usecase || null,
     startedAt: r.started_at, submittedAt: r.submitted_at,
     submitReason: r.submit_reason === 'time_up' ? 'Time over' : r.submit_reason === 'admin' ? 'Force-submitted by admin' : r.submit_reason ? 'Submitted by candidate' : null,
@@ -1142,10 +1174,10 @@ function ucResults() {
   }));
 }
 
-admin.get('/usecase-results', (req, res) => res.json({ settings: getSettings(), results: ucResults() }));
+admin.get('/usecase-results', async (req, res) => res.json({ settings: getSettings(), results: await ucResults() }));
 
-admin.put('/usecase-results/:id', (req, res) => {
-  const att = sql('SELECT * FROM uc_attempts WHERE user_id = ?').get(Number(req.params.id));
+admin.put('/usecase-results/:id', async (req, res) => {
+  const att = await sql('SELECT * FROM uc_attempts WHERE user_id = ?').get(Number(req.params.id));
   if (!att) return res.status(404).json({ error: 'This candidate has not attempted the use-case round.' });
   if (att.status !== 'submitted') return res.status(409).json({ error: 'Marks can be entered after the candidate submits.' });
   const max = getSettings().ucMaxMarks;
@@ -1153,17 +1185,17 @@ admin.put('/usecase-results/:id', (req, res) => {
   const marks = raw === null || raw === '' || raw === undefined ? null : Number(raw);
   if (marks !== null && !(Number.isFinite(marks) && marks >= 0 && marks <= max)) return res.status(400).json({ error: `Marks must be between 0 and ${max}.` });
   const remarks = String(req.body?.remarks || '').trim().slice(0, 1000) || null;
-  sql('UPDATE uc_attempts SET marks = ?, remarks = ?, evaluated_at = ? WHERE id = ?')
+  await sql('UPDATE uc_attempts SET marks = ?, remarks = ?, evaluated_at = ? WHERE id = ?')
     .run(marks === null ? null : Math.round(marks * 100) / 100, remarks, marks === null ? null : now(), att.id);
   res.json({ ok: true });
 });
 
-admin.post('/usecase-results/:id/force-submit', (req, res) => {
-  const r = sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = 'admin' WHERE user_id = ? AND status = 'in_progress'").run(now(), Number(req.params.id));
+admin.post('/usecase-results/:id/force-submit', async (req, res) => {
+  const r = await sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = 'admin' WHERE user_id = ? AND status = 'in_progress'").run(now(), Number(req.params.id));
   r.changes ? res.json({ ok: true }) : res.status(404).json({ error: 'No use-case attempt in progress for this candidate.' });
 });
 
-admin.get('/export.csv', (req, res) => {
+admin.get('/export.csv', async (req, res) => {
   const cell = (v) => {
     let s = v === null || v === undefined ? '' : String(v);
     if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`; // block spreadsheet formula injection
@@ -1173,7 +1205,7 @@ admin.get('/export.csv', (req, res) => {
   if (getSettings().examMode === 'usecase') {
     const max = getSettings().ucMaxMarks;
     const lines = [['Roll No', 'Name', 'Status', 'Use Case', 'Solution Link', `Marks (/${max})`, 'Remarks', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'].map(cell).join(',')];
-    for (const r of ucResults()) {
+    for (const r of await ucResults()) {
       lines.push([r.username, r.name, r.status, r.usecase || '', r.url || '', r.marks ?? '', r.remarks || '', iso(r.startedAt), iso(r.submittedAt), r.submitReason || ''].map(cell).join(','));
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -1182,7 +1214,7 @@ admin.get('/export.csv', (req, res) => {
   }
   const header = ['Roll No', 'Name', 'Status', `Score (/${bank().MAX_SCORE})`, ...bank().SECTIONS.map((s) => s.title),
     'Correct', 'Wrong', 'Unattempted', 'Warnings', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'];
-  const rows = sql(`
+  const rows = await sql(`
     SELECT u.username, u.name, a.status, a.score, a.section_scores, a.violations, a.started_at, a.submitted_at, a.submit_reason
     FROM users u LEFT JOIN attempts a ON a.user_id = u.id
     WHERE u.role = 'student' AND u.status = 'approved' ORDER BY a.score DESC NULLS LAST, u.username`).all();
@@ -1212,12 +1244,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Server error.' });
 });
 
-// On hosts without a shell (e.g. Render), the first admin can be created from ADMIN_USERNAME / ADMIN_PASSWORD.
+// On hosts without a shell (e.g. Azure App Service, Render), the first admin can be created from ADMIN_USERNAME / ADMIN_PASSWORD.
 async function bootstrapAdmin() {
-  const admins = sql("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get().n;
+  const admins = (await sql("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get()).n;
   const { ADMIN_USERNAME, ADMIN_PASSWORD } = process.env;
   if (!admins && ADMIN_USERNAME && ADMIN_PASSWORD) {
-    sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'admin', 'approved', ?)")
+    await sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'admin', 'approved', ?)")
       .run(ADMIN_USERNAME, 'Administrator', await hashPassword(ADMIN_PASSWORD, { admin: true }), now());
     console.log(`Admin "${ADMIN_USERNAME}" created from environment variables.`);
     return;
@@ -1225,12 +1257,21 @@ async function bootstrapAdmin() {
   if (!admins) console.log('No admin account yet. Set ADMIN_USERNAME and ADMIN_PASSWORD, or run: npm run create-admin -- <username> <password> "<Full Name>"');
 }
 
-bootstrapAdmin().then(() => {
+(async () => {
+  await db.init();
+  await storage.init();
+  await seed();
+  await bootstrapAdmin();
+  console.log(`Database: ${db.DRIVER === 'pg' ? 'PostgreSQL' : 'SQLite'} · Files: ${storage.AZURE ? 'Azure Blob Storage' : 'local disk'}`);
+
   const server = http.createServer(app);
-  // Behind Render's load balancer: keep idle connections open longer than the proxy does.
+  // Behind a load balancer (Azure, Render): keep idle connections open longer than the proxy does.
   server.on('connection', (socket) => { conn.opened++; conn.open++; socket.on('close', () => { conn.open--; }); });
   server.keepAliveTimeout = 65 * 1000;
   server.headersTimeout = 66 * 1000;
   // A large accept backlog absorbs the moment when every student clicks "Start" together.
   server.listen({ port: PORT, backlog: 4096 }, () => console.log(`Assessment portal running on http://localhost:${PORT}`));
+})().catch((e) => {
+  console.error('Startup failed:', e);
+  process.exit(1);
 });
