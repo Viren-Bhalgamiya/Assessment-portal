@@ -17,24 +17,6 @@ fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : 
 loadBranding().then((info) => {
   if (!info) return;
   if (!info.open) $('#tab-register').hidden = true;
-  if (info.mode === 'usecase') {
-    $('#login-rules').replaceChildren(...[
-      'Use a laptop or desktop computer with a stable internet connection.',
-      'After signing in and starting the round, you will be assigned one use case at random. The timer starts when you click "Start".',
-      'Submit one link to your solution (for example a GitHub repository, Google Drive folder or deployed app) before the time ends. Make sure the link can be opened without signing in.',
-      'You can submit only once. Do not share your email ID or password.',
-    ].map((t) => h('li', null, t)));
-    $('#fact-q-label').textContent = 'Test type';
-    $('#fact-q').textContent = 'Use-case round';
-    $('#fact-t').textContent = info.durationMin;
-    $('#fact-m').textContent = `Evaluated by the examiner (maximum ${info.useCaseMaxMarks} marks)`;
-    return;
-  }
-  $('#fact-q').textContent = info.questionCount;
-  $('#fact-t').textContent = info.durationMin;
-  $('#fact-m').textContent = info.marking
-    ? `+${info.marking.marks} for a correct answer, ${info.marking.negative ? `−${info.marking.negative} for a wrong answer` : 'no negative marking'}`
-    : `Varies by question (maximum ${info.maxScore} marks)`;
 });
 
 $('#login-form').addEventListener('submit', async (e) => {
