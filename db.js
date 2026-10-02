@@ -14,6 +14,8 @@ const DRIVER = process.env.PGHOST || process.env.DATABASE_URL ? 'pg' : 'sqlite';
 
 const DEFAULT_SETTINGS = {
   exam_open: '0',
+  schedule_start: '',       // ms timestamp: the test opens by itself at this time ('' = not scheduled)
+  schedule_end: '',         // ms timestamp: the test closes and every attempt ends at this time
   registration_open: '1',
   exam_mode: 'mcq',          // 'mcq' = MCQ test (engineering); 'usecase' = use-case round
   uc_duration_min: '120',
@@ -301,11 +303,28 @@ async function loadSettings() {
   settingsCache = null;
 }
 
+// Whether candidates may start the test right now. With a schedule the test opens at the start time and
+// closes at the end time by itself; without one the admin's "Test is open" switch decides.
+function openNow(base, t = Date.now()) {
+  const { scheduleStart: start, scheduleEnd: end } = base;
+  if (end && t >= end) return false;
+  if (start) return t >= start;
+  return base.examOpenManual;
+}
+
 function getSettings() {
-  if (settingsCache) return settingsCache;
+  if (!settingsCache) settingsCache = buildSettings();
+  const t = Date.now();
+  return Object.freeze({ ...settingsCache, examOpen: openNow(settingsCache, t), now: t });
+}
+
+function buildSettings() {
   const map = settingsMap;
-  settingsCache = Object.freeze({
-    examOpen: map.exam_open === '1',
+  const ts = (v) => (Number(v) > 0 ? Number(v) : null);
+  return Object.freeze({
+    examOpenManual: map.exam_open === '1',
+    scheduleStart: ts(map.schedule_start),
+    scheduleEnd: ts(map.schedule_end),
     registrationOpen: map.registration_open === '1',
     examMode: map.exam_mode === 'usecase' ? 'usecase' : 'mcq',
     ucDurationMin: Number(map.uc_duration_min) || 120,
@@ -317,7 +336,6 @@ function getSettings() {
     maxViolations: Number(map.max_violations),
     snapshotIntervalSec: Number(map.snapshot_interval_sec),
   });
-  return settingsCache;
 }
 
 async function setSetting(key, value) {

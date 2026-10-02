@@ -7,7 +7,7 @@ const S = {
   me: null,
   questions: [], sections: [], answers: {}, marked: new Set(), idx: 0, qbtns: [],
   deadlineLocal: 0, warned5: false,
-  violations: 0, maxViolations: 3, snapshotIntervalSec: 30, secCounts: [],
+  violations: 0, maxViolations: 3, secCounts: [],
   cam: null, screen: null, camMutedAt: 0,
   mic: null, micMutedAt: 0, audio: null, // audio = { ctx, analyser, buf, floor, loud: [], lastVoice, silentSince, recording }
   started: false, ended: false, submitting: false,
@@ -66,6 +66,24 @@ function showSubmitted(kind) {
 }
 
 $('#msg-refresh').onclick = () => location.reload();
+
+// Before the scheduled start (or after the end) the candidate sees when the test opens / that it has ended.
+// The page reloads by itself at the start time.
+function showClosed(st) {
+  const fmt = (ms) => new Date(ms).toLocaleString(undefined, { weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' });
+  if (st.scheduleEnd && st.serverTime >= st.scheduleEnd) {
+    return showMessage('Test Has Ended', `The test closed on ${fmt(st.scheduleEnd)}.`, { tone: 'warn', ic: 'clock' });
+  }
+  if (st.scheduleStart && st.serverTime < st.scheduleStart) {
+    const wait = st.scheduleStart - st.serverTime;
+    showMessage('Test Not Yet Started', `The test opens on ${fmt(st.scheduleStart)}` +
+      (st.scheduleEnd ? ` and closes on ${fmt(st.scheduleEnd)}` : '') + '. This page will open the test automatically at the start time.', { refresh: true, tone: 'info', ic: 'clock' });
+    // a little after the start, so the server clock has passed it too
+    if (wait < 24 * 3600 * 1000) setTimeout(() => location.reload(), wait + 1500 + Math.random() * 3000);
+    return;
+  }
+  showMessage('Test Not Yet Started', 'The test has not been opened yet. Please wait for the invigilator\'s instruction and click Refresh.', { refresh: true, tone: 'info', ic: 'clock' });
+}
 $('#msg-logout').onclick = logout;
 $('#setup-logout').onclick = logout;
 
@@ -99,9 +117,7 @@ async function init() {
   }
   if (st.approval === 'rejected') return showMessage('Registration Not Approved', 'Your registration has not been approved. Please contact the examination authority.', { tone: 'danger', ic: 'x' });
   if (st.status === 'submitted') return showSubmitted(st.violations >= st.maxViolations && st.maxViolations > 0 ? 'terminated' : 'already');
-  if (st.status === 'none' && !st.examOpen) {
-    return showMessage('Test Not Yet Started', 'The test has not been opened yet. Please wait for the invigilator\'s instruction and click Refresh.', { refresh: true, tone: 'info', ic: 'clock' });
-  }
+  if (st.status === 'none' && !st.examOpen) return showClosed(st);
   showSetup(st);
 }
 
@@ -135,13 +151,13 @@ function showSetup(st) {
       : 'The marks for each question are displayed above the question. Wrong answers may carry negative marks. No marks are awarded or deducted for unattempted questions.'],
     ['book', 'To answer a question, select an option and click "Save & Next". Use "Mark for Review & Next" to revisit a question later; answered questions marked for review will be evaluated. Use "Clear Response" to remove a selected answer.'],
     ['book', 'Use the question palette on the right to move directly to any question of the current section. The colour of each number shows the status of the question (see the legend below).'],
-    ['alert', 'Your webcam and microphone must stay on for the whole test. Sound around you is monitored: if speech or other sound is detected, a short audio recording is sent to the examination authority. Turning off or muting the microphone is recorded as a violation.', true],
+    ['alert', 'Your webcam and microphone must stay on for the whole test. Sound around you is monitored, and detected speech is reported to the examination authority. Turning off or muting the microphone is recorded as a violation.', true],
     ['maximize', 'The test runs in full-screen mode. Switching to another tab, window or application, minimising the browser, leaving full-screen mode or reloading the page is recorded as a violation.', true],
     ['copyoff', 'Copying, cutting, pasting, right-clicking and keyboard shortcuts are not permitted. Any such attempt is recorded as a violation.', true],
     ['alert', st.maxViolations > 0
       ? `If ${st.maxViolations} violations are recorded, the test is submitted automatically and cannot be re-attempted.`
       : 'Every violation is recorded and reviewed by the examination authority.', true],
-    ['camera', 'Your webcam must remain switched on with your face clearly visible, and your entire screen must be shared for the whole test. Both are recorded.'],
+    ['camera', 'Your webcam must remain switched on with your face clearly visible, and your entire screen must be shared for the whole test. Both are monitored.'],
     ['shield', 'Responses are saved automatically. Marks are not displayed after submission; results will be declared by the examination authority.'],
   ];
   $('#rules').replaceChildren(...rules.map(([ic, text, danger]) => h('li', { class: danger ? 'danger' : null }, icon(ic), h('span', null, text))));
@@ -219,13 +235,13 @@ async function startMic() {
   track.addEventListener('ended', () => { if (S.mic === stream) onMicLost('Microphone was turned off or disconnected'); });
   track.addEventListener('mute', () => { if (S.mic === stream) S.micMutedAt = Date.now(); });
   track.addEventListener('unmute', () => { if (S.mic === stream) S.micMutedAt = 0; });
-  // level analysis (runs locally; only short clips around detected speech are uploaded)
+  // level analysis runs locally in the browser; no audio is recorded or uploaded
   try { S.audio?.ctx.close(); } catch { /* ignore */ }
   const ctx = new AudioContext();
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;
   ctx.createMediaStreamSource(stream).connect(analyser);
-  S.audio = { ctx, analyser, buf: new Float32Array(analyser.fftSize), floor: 0, frames: 0, loud: [], lastVoice: 0, silentSince: 0, lastSilentReport: 0, recording: false };
+  S.audio = { ctx, analyser, buf: new Float32Array(analyser.fftSize), floor: 0, frames: 0, loud: [], lastVoice: 0, silentSince: 0, lastSilentReport: 0 };
   if (!S.audioTimer) S.audioTimer = setInterval(audioTick, 100);
 }
 
@@ -265,35 +281,8 @@ function audioTick() {
   if (a.loud.filter(Boolean).length >= VOICE_MIN_LOUD && Date.now() - a.lastVoice > VOICE_COOLDOWN_MS) {
     a.lastVoice = Date.now();
     a.loud = [];
-    report('voice_detected', 'Speech or sound was detected near the candidate (audio clip recorded)');
-    snap('camera');
-    recordClip();
+    report('voice_detected', 'Speech or sound was detected near the candidate');
   }
-}
-
-// Record ~10 s of microphone audio and upload it for the examiner.
-function recordClip(ms = 10000) {
-  const a = S.audio;
-  if (!a || a.recording || !window.MediaRecorder || !isLiveAudio(S.mic)) return;
-  const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported(t));
-  if (!type) return;
-  let rec;
-  try { rec = new MediaRecorder(S.mic, { mimeType: type, audioBitsPerSecond: 24000 }); } catch { return; }
-  const parts = [];
-  const t0 = Date.now();
-  a.recording = true;
-  rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
-  rec.onstop = () => {
-    a.recording = false;
-    const blob = new Blob(parts, { type: type.split(';')[0] });
-    if (blob.size < 200 || S.ended) return;
-    fetch('/api/exam/audio', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': type.split(';')[0], 'X-Duration-Ms': String(Date.now() - t0) }, body: blob,
-    }).catch(() => {});
-  };
-  rec.start();
-  setTimeout(() => { if (rec.state !== 'inactive') rec.stop(); }, ms);
 }
 
 async function startScreen() {
@@ -392,7 +381,6 @@ function beginExam(data) {
   S.answers = data.answers || {};
   S.violations = data.violations;
   S.maxViolations = data.maxViolations;
-  S.snapshotIntervalSec = data.snapshotIntervalSec;
   S.timing = data.timingMode;
   applySection(data.section, false);
   S.marked = loadSet('marked');
@@ -415,9 +403,7 @@ function beginExam(data) {
   tick();
   S.timers.push(setInterval(tick, 500));
   S.timers.push(setInterval(heartbeat, 20000));
-  S.timers.push(setInterval(takeSnapshots, S.snapshotIntervalSec * 1000));
   S.timers.push(setInterval(checkDevices, 3000));
-  setTimeout(takeSnapshots, 2000);
 }
 
 // ---------- per-section timing ----------
@@ -815,7 +801,6 @@ function onFocusLost(detail) {
   if (!monitoring() || S.focusLost || S.inPicker || S.unloading) return;
   S.focusLost = true;
   warn('focus_lost', detail, 'you left the test window.');
-  setTimeout(() => snap('screen'), 1200); // capture what the student switched to
 }
 
 // Remember when the student came back: Chrome delivers the fullscreen-exit caused by a tab switch
@@ -990,38 +975,6 @@ window.addEventListener('beforeunload', (e) => {
   if (S.started && !S.ended) { e.preventDefault(); e.returnValue = ''; }
 });
 
-// ---------- snapshots ----------
-const canvas = $('#snap-canvas');
-const ctx = canvas.getContext('2d');
-
-async function frameFrom(stream, video, maxW) {
-  const track = stream?.getVideoTracks()[0];
-  if (!track || track.readyState !== 'live') return null;
-  let src = null;
-  let w = 0;
-  let hgt = 0;
-  if (window.ImageCapture) {
-    try { src = await new ImageCapture(track).grabFrame(); w = src.width; hgt = src.height; } catch { src = null; }
-  }
-  if (!src && video.videoWidth) { src = video; w = video.videoWidth; hgt = video.videoHeight; }
-  if (!src || !w) return null;
-  const scale = Math.min(1, maxW / w);
-  canvas.width = Math.round(w * scale);
-  canvas.height = Math.round(hgt * scale);
-  ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
-  src.close?.();
-  return canvas.toDataURL('image/jpeg', 0.5);
-}
-
-async function snap(kind) {
-  if (S.ended) return;
-  // Small frames keep uploads and storage manageable with 1000+ students (~15 KB camera, ~60 KB screen).
-  const image = kind === 'camera' ? await frameFrom(S.cam, camVideo, 320) : await frameFrom(S.screen, screenVideo, 1024);
-  if (image) api('POST', '/api/exam/snapshot', { kind, image }).catch(() => {});
-}
-
-function takeSnapshots() { snap('camera'); snap('screen'); }
-
 // ---------- submit ----------
 function openConfirm() {
   const c = counts();
@@ -1087,9 +1040,7 @@ async function initUseCase() {
   $('#uc-who').textContent = `${S.me.name} (${S.me.username})`;
   if (st.status === 'submitted') return ucSubmitted(st);
   if (st.status === 'in_progress') return ucWork(st);
-  if (!st.examOpen) {
-    return showMessage('Test Not Yet Started', 'The test has not been opened yet. Please wait for the invigilator\'s instruction and click Refresh.', { refresh: true, tone: 'info', ic: 'clock' });
-  }
+  if (!st.examOpen) return showClosed(st);
   $('#uc-hs-t').textContent = st.durationMin;
   $('#uc-hs-m').textContent = st.maxMarks;
   const rules = [

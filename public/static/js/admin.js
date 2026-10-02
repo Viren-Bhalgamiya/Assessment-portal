@@ -66,9 +66,14 @@ async function loadSummary(auto = false) {
 }
 
 function renderExamState() {
-  const open = A.summary.settings.examOpen;
+  const s = A.summary.settings;
+  const open = s.examOpen;
   const el = $('#exam-state');
-  el.replaceChildren(h('span', { class: 'dot' }), `${A.ucMode ? 'Use-Case Round' : 'MCQ Test'} · ${open ? 'Open' : 'Closed'}`);
+  let state = open ? 'Open' : 'Closed';
+  if (s.scheduleEnd && s.now >= s.scheduleEnd) state = 'Ended';
+  else if (!open && s.scheduleStart && s.now < s.scheduleStart) state = `Opens ${fmtTime(s.scheduleStart)}`;
+  else if (open && s.scheduleEnd) state = `Open until ${fmtTime(s.scheduleEnd)}`;
+  el.replaceChildren(h('span', { class: 'dot' }), `${A.ucMode ? 'Use-Case Round' : 'MCQ Test'} · ${state}`);
   el.className = `badge ${open ? 'ok' : 'neutral'}`;
 }
 
@@ -274,7 +279,7 @@ async function resetPassword(s) {
 }
 
 async function resetAttempt(s) {
-  const what = A.ucMode ? 'use-case attempt, submitted link and marks' : 'attempt, answers, warnings and snapshots';
+  const what = A.ucMode ? 'use-case attempt, submitted link and marks' : 'attempt, answers and warnings';
   if (!confirm(`Delete ${s.username}'s ${what} so they can take the test again? This cannot be undone.`)) return;
   try {
     await api('POST', `/api/admin/students/${s.id}/reset-attempt`);
@@ -419,24 +424,6 @@ function renderDrawer(d, openQids) {
         h('td', { class: 'wrap' }, e.detail || ''),
         h('td', null, e.counted ? h('span', { class: 'badge danger' }, 'Violation') : '')))))));
 
-  const gallery = (kind) => {
-    const snaps = d.snapshots.filter((s) => s.kind === kind);
-    return h('div', null,
-      h('h3', null, icon(kind === 'camera' ? 'camera' : 'monitor'), `${kind === 'camera' ? 'Webcam' : 'Screen'} Snapshots (${snaps.length})`),
-      snaps.length ? h('div', { class: 'gallery' }, snaps.slice().reverse().map((s) => h('figure', null,
-        h('img', { src: `/api/admin/snapshots/${s.id}`, loading: 'lazy', alt: `${kind} snapshot`, onclick: () => openLightbox(`/api/admin/snapshots/${s.id}`) }),
-        h('figcaption', null, new Date(s.at).toLocaleTimeString())))) : h('p', { class: 'muted' }, 'None yet.'));
-  };
-  const clips = d.audio || [];
-  const audio = h('div', null,
-    h('h3', null, `Audio Recordings (${clips.length})`),
-    clips.length ? h('div', { class: 'audio-list' }, clips.slice().reverse().map((c) => h('div', { class: 'clip' },
-      h('strong', null, new Date(c.at).toLocaleTimeString()),
-      c.durationMs ? h('span', { class: 'muted' }, `${Math.round(c.durationMs / 1000)} s`) : null,
-      h('audio', { controls: true, preload: 'none', src: `/api/admin/audio/${c.id}` })))) :
-      h('p', { class: 'muted' }, 'None. A clip is recorded whenever speech or sound is detected near the candidate.'));
-  const snapshots = h('section', { style: 'display:grid;gap:18px' }, gallery('camera'), audio, gallery('screen'));
-
   const L = d.letters;
   const review = h('section', null,
     h('h3', null, 'Response Sheet'),
@@ -454,7 +441,7 @@ function renderDrawer(d, openQids) {
         class: i === q.correct ? 'correct' : i === q.chosen ? 'chosen-wrong' : null,
       }, `(${L[i]}) ${o}`, i === q.correct ? '  ✓' : '', i === q.chosen && i !== q.correct ? '  ✗ chosen' : ''))))));
 
-  $('#drawer-sheet').replaceChildren(head, h('div', { class: 'body' }, summary, bars, events, snapshots, review));
+  $('#drawer-sheet').replaceChildren(head, h('div', { class: 'body' }, summary, bars, events, review));
 }
 
 function openLightbox(src) {
@@ -699,14 +686,16 @@ async function removeQuestion(q) {
 // ---------- settings ----------
 function fillSettings() {
   const s = A.summary.settings;
-  $('#set-open').checked = s.examOpen;
+  $('#set-open').checked = s.examOpenManual;
+  $('#set-start').value = toLocalInput(s.scheduleStart);
+  $('#set-end').value = toLocalInput(s.scheduleEnd);
+  syncScheduleFields();
   $('#set-reg').checked = s.registrationOpen;
   $('#set-duration').value = s.durationMin;
   $('#set-timing-overall').checked = s.timingMode !== 'section';
   $('#set-timing-section').checked = s.timingMode === 'section';
   syncTimingFields();
   $('#set-maxv').value = s.maxViolations;
-  $('#set-snap').value = s.snapshotIntervalSec;
   $('#set-org').value = s.orgName;
   $('#set-exam').value = s.examName;
   $('#set-mode-mcq').checked = s.examMode !== 'usecase';
@@ -746,11 +735,12 @@ $('#settings-form').onsubmit = async (e) => {
   try {
     await api('PUT', '/api/admin/settings', {
       examOpen: $('#set-open').checked,
+      scheduleStart: fromLocalInput($('#set-start').value),
+      scheduleEnd: fromLocalInput($('#set-end').value),
       registrationOpen: $('#set-reg').checked,
       durationMin: Number($('#set-duration').value),
       timingMode: $('#set-timing-section').checked ? 'section' : 'overall',
       maxViolations: Number($('#set-maxv').value),
-      snapshotIntervalSec: Number($('#set-snap').value),
       orgName: $('#set-org').value,
       examName: $('#set-exam').value,
       examMode: $('#set-mode-uc').checked ? 'usecase' : 'mcq',
@@ -952,6 +942,25 @@ async function removeUseCase(u) {
   } catch (err) { toast(err.message, 'warn'); }
 }
 $('#btn-add-uc').onclick = () => openUseCaseEditor(null);
+
+// ---------- test schedule ----------
+// <input type="datetime-local"> works in the admin's own time zone; the server stores timestamps.
+function toLocalInput(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const fromLocalInput = (v) => (v ? new Date(v).getTime() : null);
+
+function syncScheduleFields() {
+  const scheduled = !!($('#set-start').value || $('#set-end').value);
+  $('#row-open').classList.toggle('disabled', scheduled);
+  $('#set-open').disabled = scheduled;
+}
+$('#set-start').oninput = syncScheduleFields;
+$('#set-end').oninput = syncScheduleFields;
+$('#btn-clear-schedule').onclick = () => { $('#set-start').value = ''; $('#set-end').value = ''; syncScheduleFields(); };
 
 // ---------- start ----------
 (async () => {

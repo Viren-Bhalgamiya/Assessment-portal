@@ -298,6 +298,12 @@ async function activeAttemptOr409(req, res) {
   return att;
 }
 
+function closedMessage(s) {
+  if (s.scheduleEnd && s.now >= s.scheduleEnd) return 'The test has ended.';
+  if (s.scheduleStart && s.now < s.scheduleStart) return 'The test has not started yet.';
+  return 'The test has not been opened yet.';
+}
+
 const remainingSec = (att) => Math.max(0, Math.ceil((att.deadline - now()) / 1000));
 
 function studentState(att) {
@@ -309,20 +315,17 @@ function studentState(att) {
     remainingSec: remainingSec(att),
     violations: att.violations,
     maxViolations: s.maxViolations,
-    snapshotIntervalSec: s.snapshotIntervalSec,
     lastSeq: att.last_seq,
   };
 }
 
-// Snapshots and audio clips of an attempt live under snapshots/<attemptId>/ in storage.
+// Files from earlier versions (snapshots, audio clips) are removed together with the attempt.
 const attemptFileKey = (attemptId, file) => `snapshots/${Number(attemptId)}/${path.basename(file)}`;
 async function removeSnapshotDir(attemptId) {
   await storage.removePrefix(`snapshots/${Number(attemptId)}`).catch((e) => console.error('Could not remove files of attempt', attemptId, e.message));
 }
 
-// Sweep: auto-submit attempts whose time has run out even if the student's browser is gone,
-// and flag attempts whose camera/screen snapshots stopped arriving (e.g. monitoring was tampered with).
-const gapFlagged = new Map(); // `${attemptId}:${kind}` -> timestamp of the last snapshot already flagged
+// Sweep: auto-submit attempts whose time has run out even if the student's browser is gone.
 let sweeping = false;
 async function sweep() {
   await sql(`UPDATE uc_attempts SET status = 'submitted', submitted_at = deadline, submit_reason = 'time_up'
@@ -330,24 +333,6 @@ async function sweep() {
   const expired = await sql("SELECT id FROM attempts WHERE status = 'in_progress' AND deadline < ?").all(now() - GRACE_MS);
   for (const { id } of expired) await finalize(id, 'time_up');
   await sql('DELETE FROM sessions WHERE expires_at < ?').run(now());
-
-  const gapMs = Math.max(90 * 1000, getSettings().snapshotIntervalSec * 3000);
-  const active = await sql("SELECT id, started_at FROM attempts WHERE status = 'in_progress' AND started_at < ?").all(now() - gapMs);
-  const lastSnaps = new Map();
-  for (const r of await sql(`SELECT s.attempt_id, s.kind, MAX(s.at) AS t FROM snapshots s JOIN attempts a ON a.id = s.attempt_id
-                              WHERE a.status = 'in_progress' GROUP BY s.attempt_id, s.kind`).all()) {
-    lastSnaps.set(`${r.attempt_id}:${r.kind}`, r.t);
-  }
-  for (const att of active) {
-    for (const kind of ['camera', 'screen']) {
-      const key = `${att.id}:${kind}`;
-      const last = lastSnaps.get(key) || att.started_at;
-      if (now() - last > gapMs && gapFlagged.get(key) !== last) {
-        gapFlagged.set(key, last);
-        await logEvent(att.id, 'monitoring_gap', `No ${kind} snapshot received for over ${Math.round(gapMs / 1000)} s`, false);
-      }
-    }
-  }
 }
 setInterval(() => {
   if (sweeping) return;
@@ -521,7 +506,7 @@ app.get('/api/exam/status', requireRole('student'), oneAtATime, async (req, res)
     approval: 'approved',
     violations: att ? att.violations : 0,
     lastSeq: att ? att.last_seq : 0,
-    examOpen: s.examOpen,
+    examOpen: s.examOpen, scheduleStart: s.scheduleStart, scheduleEnd: s.scheduleEnd, serverTime: s.now,
     durationMin: effectiveDurationMin(),
     timingMode: s.timingMode,
     sectionTimes: nonEmptySections().map((x) => ({ title: x.title, minutes: x.minutes })),
@@ -539,7 +524,7 @@ app.post('/api/exam/start', requireApprovedStudent, async (req, res) => {
   if (att && att.status === 'submitted') return res.status(409).json({ error: 'Your exam has already been submitted.', submitted: true });
 
   if (!att) {
-    if (!s.examOpen) return res.status(403).json({ error: 'The exam is not open yet.' });
+    if (!s.examOpen) return res.status(403).json({ error: closedMessage(s) });
     if (s.examMode !== 'mcq') return res.status(409).json({ error: 'The MCQ test is not active.' });
     if (!bank().BY_ID.size) return res.status(409).json({ error: 'The exam has no questions yet. Contact the examiner.' });
     let timing = null;
@@ -551,6 +536,7 @@ app.post('/api/exam/start', requireApprovedStudent, async (req, res) => {
       totalMs = plan.reduce((t2, p2) => t2 + p2.sec, 0) * 1000;
     }
     const t = now();
+    if (s.scheduleEnd) totalMs = Math.min(totalMs, s.scheduleEnd - t); // nobody works past the end time
     const attemptId = await sql(`INSERT INTO attempts (user_id, status, layout, started_at, deadline, ip, user_agent, timing, sec_index, sec_started_at)
                           VALUES (?, 'in_progress', ?, ?, ?, ?, ?, ?, 0, ?)`)
       .insert(req.user.id, JSON.stringify(buildLayout()), t, t + totalMs, req.ip,
@@ -660,57 +646,14 @@ app.post('/api/exam/next-section', requireApprovedStudent, async (req, res) => {
     const i = sec.index + 1;
     const t = now();
     const restMs = sec.plan.slice(i).reduce((sum, p2) => sum + p2.sec, 0) * 1000;
-    await sql('UPDATE attempts SET sec_index = ?, sec_started_at = ?, deadline = ? WHERE id = ?').run(i, t, t + restMs, att.id);
+    const end = getSettings().scheduleEnd;
+    await sql('UPDATE attempts SET sec_index = ?, sec_started_at = ?, deadline = ? WHERE id = ?').run(i, t, Math.min(t + restMs, end || Infinity), att.id);
     await logEvent(att.id, 'section_finished', `Finished "${sec.plan[sec.index].title}" and moved to "${sec.plan[i].title}"`, false);
     const fresh = await currentAttempt(req.user.id);
     return res.json(studentState(fresh));
   }
   res.json(studentState(att)); // already moved on (e.g. time ran out) or last section
 });
-
-const lastSnapshot = new Map(); // `${attemptId}:${kind}` -> time
-
-const JPEG_PREFIX = 'data:image/jpeg;base64,';
-
-app.post('/api/exam/snapshot', approvedStudent, safe(async (req, res) => {
-  const att = await activeAttemptOr409(req, res);
-  if (!att) return;
-  const kind = req.body?.kind;
-  if (kind !== 'camera' && kind !== 'screen') return res.status(400).json({ error: 'Invalid kind.' });
-  const image = req.body?.image;
-  if (typeof image !== 'string' || !image.startsWith(JPEG_PREFIX)) return res.status(400).json({ error: 'Invalid image.' });
-
-  const key = `${att.id}:${kind}`;
-  if ((lastSnapshot.get(key) || 0) > now() - 8000) return res.json({ ok: true, skipped: true });
-  const buf = Buffer.from(image.slice(JPEG_PREFIX.length), 'base64');
-  if (buf.length > 1.5 * 1024 * 1024 || buf[0] !== 0xff || buf[1] !== 0xd8) return res.status(400).json({ error: 'Invalid image.' });
-  lastSnapshot.set(key, now());
-
-  const file = `${now()}-${kind}.jpg`;
-  await storage.put(attemptFileKey(att.id, file), buf, 'image/jpeg');
-  await sql('INSERT INTO snapshots (attempt_id, kind, file, at) VALUES (?, ?, ?, ?)').run(att.id, kind, file, now());
-  res.json({ ok: true });
-}));
-
-// Microphone clips (webm/ogg, a few seconds long) recorded when the browser detects speech or sound.
-const AUDIO_MAX_PER_ATTEMPT = 120;
-const lastAudio = new Map(); // attemptId -> time
-app.post('/api/exam/audio', approvedStudent, express.raw({ type: ['audio/webm', 'audio/ogg'], limit: '1mb' }), safe(async (req, res) => {
-  const att = await activeAttemptOr409(req, res);
-  if (!att) return;
-  const buf = req.body;
-  const isWebm = Buffer.isBuffer(buf) && buf.length > 100 && buf.readUInt32BE(0) === 0x1a45dfa3;
-  const isOgg = Buffer.isBuffer(buf) && buf.length > 100 && buf.subarray(0, 4).toString('latin1') === 'OggS';
-  if (!isWebm && !isOgg) return res.status(400).json({ error: 'Invalid audio.' });
-  if ((lastAudio.get(att.id) || 0) > now() - 10000) return res.json({ ok: true, skipped: true });
-  if ((await sql('SELECT COUNT(*) AS n FROM audio_clips WHERE attempt_id = ?').get(att.id)).n >= AUDIO_MAX_PER_ATTEMPT) return res.json({ ok: true, skipped: true });
-  lastAudio.set(att.id, now());
-  const file = `${now()}-audio.${isWebm ? 'webm' : 'ogg'}`;
-  await storage.put(attemptFileKey(att.id, file), buf, isWebm ? 'audio/webm' : 'audio/ogg');
-  const ms = Math.min(60000, Math.max(0, Number(req.get('X-Duration-Ms')) || 0)) || null;
-  await sql('INSERT INTO audio_clips (attempt_id, file, duration_ms, at) VALUES (?, ?, ?, ?)').run(att.id, file, ms, now());
-  res.json({ ok: true });
-}));
 
 app.post('/api/exam/submit', requireApprovedStudent, async (req, res) => {
   const att = await currentAttempt(req.user.id);
@@ -737,7 +680,8 @@ async function ucState(userId) {
   const att = await currentUcAttempt(userId);
   const u = att && att.status === 'in_progress' && att.usecase_id ? await uc.getUseCase(att.usecase_id) : null;
   return {
-    mode: s.examMode, examOpen: s.examOpen, durationMin: s.ucDurationMin, maxMarks: s.ucMaxMarks,
+    mode: s.examMode, examOpen: s.examOpen, scheduleStart: s.scheduleStart, scheduleEnd: s.scheduleEnd, serverTime: s.now,
+    durationMin: s.ucDurationMin, maxMarks: s.ucMaxMarks,
     useCaseCount: await uc.countUseCases(),
     status: att ? att.status : 'none',
     remainingSec: att && att.status === 'in_progress' ? Math.max(0, Math.ceil((att.deadline - now()) / 1000)) : null,
@@ -755,13 +699,13 @@ app.post('/api/usecase/start', requireApprovedStudent, async (req, res) => {
   const existing = await currentUcAttempt(req.user.id);
   if (existing?.status === 'submitted') return res.status(409).json({ error: 'You have already submitted your solution.', submitted: true });
   if (!existing) {
-    if (!s.examOpen) return res.status(403).json({ error: 'The test has not been opened yet.' });
+    if (!s.examOpen) return res.status(403).json({ error: closedMessage(s) });
     const pick = await uc.pickUseCase();
     if (!pick) return res.status(409).json({ error: 'No use cases are available yet. Please contact the examination authority.' });
     const t = now();
     try {
       await sql("INSERT INTO uc_attempts (user_id, usecase_id, status, started_at, deadline, ip) VALUES (?, ?, 'in_progress', ?, ?, ?)")
-        .run(req.user.id, pick, t, t + s.ucDurationMin * 60 * 1000, req.ip);
+        .run(req.user.id, pick, t, Math.min(t + s.ucDurationMin * 60 * 1000, s.scheduleEnd || Infinity), req.ip);
     } catch (e) {
       if (!isUniqueError(e)) throw e; // double click: the first request already created it
     }
@@ -801,7 +745,6 @@ admin.get('/summary', async (req, res) => {
     SELECT u.id, u.username, u.name, u.status AS approval, u.created_at,
            a.id AS attempt_id, a.status, a.score, a.section_scores, a.violations,
            a.started_at, a.submitted_at, a.submit_reason, a.deadline,
-           (SELECT COUNT(*) FROM snapshots s WHERE s.attempt_id = a.id) AS snapshot_count,
            ua.status AS uc_status
     FROM users u LEFT JOIN attempts a ON a.user_id = u.id LEFT JOIN uc_attempts ua ON ua.user_id = u.id
     WHERE u.role = 'student' ORDER BY u.username`).all();
@@ -815,7 +758,7 @@ admin.get('/summary', async (req, res) => {
       status: r.status || 'not_started',
       ucStatus: r.uc_status || 'not_started',
       score: r.score, sectionScores: parseJSON(r.section_scores, null),
-      violations: r.violations || 0, snapshotCount: r.snapshot_count || 0,
+      violations: r.violations || 0,
       startedAt: r.started_at, submittedAt: r.submitted_at,
       submitReason: r.submit_reason ? (SUBMIT_REASONS[r.submit_reason] || r.submit_reason) : null,
       remainingSec: r.status === 'in_progress' ? Math.max(0, Math.ceil((r.deadline - now()) / 1000)) : null,
@@ -855,25 +798,7 @@ admin.get('/students/:id', async (req, res) => {
     letters: LETTERS,
     review,
     events: await sql('SELECT type, detail, counted, at FROM events WHERE attempt_id = ? ORDER BY at').all(att.id),
-    snapshots: await sql('SELECT id, kind, at FROM snapshots WHERE attempt_id = ? ORDER BY at').all(att.id),
-    audio: await sql('SELECT id, duration_ms AS "durationMs", at FROM audio_clips WHERE attempt_id = ? ORDER BY at').all(att.id),
   });
-});
-
-admin.get('/audio/:id', async (req, res) => {
-  const clip = await sql('SELECT attempt_id, file FROM audio_clips WHERE id = ?').get(Number(req.params.id));
-  if (!clip) return res.status(404).end();
-  const sent = await storage.send(res, attemptFileKey(clip.attempt_id, clip.file), {
-    'Content-Type': clip.file.endsWith('.ogg') ? 'audio/ogg' : 'audio/webm', 'Cache-Control': 'private, max-age=3600',
-  });
-  if (!sent) res.status(404).end();
-});
-
-admin.get('/snapshots/:id', async (req, res) => {
-  const snap = await sql('SELECT attempt_id, file FROM snapshots WHERE id = ?').get(Number(req.params.id));
-  if (!snap) return res.status(404).end();
-  const sent = await storage.send(res, attemptFileKey(snap.attempt_id, snap.file), { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' });
-  if (!sent) res.status(404).end();
 });
 
 // Admin-created students are approved immediately. A blank password gets a generated one,
@@ -1004,6 +929,25 @@ admin.put('/settings', async (req, res) => {
   const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
   if (b.examOpen !== undefined) await setSetting('exam_open', b.examOpen ? '1' : '0');
   if (b.registrationOpen !== undefined) await setSetting('registration_open', b.registrationOpen ? '1' : '0');
+  if (b.scheduleStart !== undefined || b.scheduleEnd !== undefined) {
+    const cur = getSettings();
+    const val = (v, old) => (v === undefined ? old : v === null || v === '' ? null : Number(v));
+    const start = val(b.scheduleStart, cur.scheduleStart);
+    const end = val(b.scheduleEnd, cur.scheduleEnd);
+    const okTs = (v) => v === null || (Number.isSafeInteger(v) && v > 0);
+    if (!okTs(start) || !okTs(end)) errors.push('Enter a valid start and end date and time.');
+    else if (start && end && end <= start) errors.push('The end time must be after the start time.');
+    else if (end && end <= now() && end !== cur.scheduleEnd) errors.push('The end time must be in the future.');
+    else {
+      await setSetting('schedule_start', start || '');
+      await setSetting('schedule_end', end || '');
+      if (end) {
+        // Candidates already taking the test also finish by the (new) end time.
+        await sql("UPDATE attempts SET deadline = ? WHERE status = 'in_progress' AND deadline > ?").run(end, end);
+        await sql("UPDATE uc_attempts SET deadline = ? WHERE status = 'in_progress' AND deadline > ?").run(end, end);
+      }
+    }
+  }
   if (b.durationMin !== undefined) intIn(b.durationMin, 1, 600) ? await setSetting('duration_min', b.durationMin) : errors.push('Duration must be 1–600 minutes.');
   if (b.maxViolations !== undefined) intIn(b.maxViolations, 1, MAX_WARNINGS) ? await setSetting('max_violations', b.maxViolations) : errors.push(`Warning limit must be between 1 and ${MAX_WARNINGS}.`);
   if (b.snapshotIntervalSec !== undefined) intIn(b.snapshotIntervalSec, 10, 600) ? await setSetting('snapshot_interval_sec', b.snapshotIntervalSec) : errors.push('Snapshot interval must be 10–600 seconds.');
@@ -1023,13 +967,19 @@ admin.put('/settings', async (req, res) => {
   if (b.ucDurationMin !== undefined) intIn(b.ucDurationMin, 1, 600) ? await setSetting('uc_duration_min', b.ucDurationMin) : errors.push('Use-case duration must be 1–600 minutes.');
   if (b.ucMaxMarks !== undefined) intIn(b.ucMaxMarks, 1, 1000) ? await setSetting('uc_max_marks', b.ucMaxMarks) : errors.push('Use-case maximum marks must be 1–1000.');
   const st = getSettings();
-  if (st.examMode === 'usecase' && st.examOpen && !(await uc.countUseCases())) {
-    await setSetting('exam_open', '0');
-    errors.push('Add at least one use case before opening the use-case round. The test was kept closed.');
+  const willOpen = st.examOpenManual || st.scheduleStart;
+  let notReady = null;
+  if (st.examMode === 'usecase' && willOpen && !(await uc.countUseCases())) {
+    notReady = 'Add at least one use case before the use-case round opens.';
+  } else if (st.examMode === 'mcq' && st.timingMode === 'section' && willOpen && sectionTimesMissing().length) {
+    notReady = `Set a time for every section before the exam opens (missing: ${sectionTimesMissing().join(', ')}).`;
   }
-  if (st.examMode === 'mcq' && st.timingMode === 'section' && st.examOpen && sectionTimesMissing().length) {
-    await setSetting('exam_open', '0');
-    errors.push(`Set a time for every section before opening the exam (missing: ${sectionTimesMissing().join(', ')}). The exam was kept closed.`);
+  if (notReady) {
+    errors.push(notReady);
+    if (st.examOpenManual && !st.scheduleStart) {
+      await setSetting('exam_open', '0');
+      errors.push('The test was kept closed.');
+    }
   }
   if (errors.length) return res.status(400).json({ error: errors.join(' ') });
   res.json(getSettings());

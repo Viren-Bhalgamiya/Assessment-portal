@@ -77,7 +77,7 @@
             </div>
             <div class="step" id="step-mic">
               <div class="num"></div>
-              <div class="body"><strong>Microphone</strong><span class="status">Audio is monitored; speech near you is recorded.</span>
+              <div class="body"><strong>Microphone</strong><span class="status">Audio is monitored during the test.</span>
                 <span class="mic-meter" id="setup-mic-meter" hidden><i></i></span></div>
               <button id="btn-mic" class="small">Enable Microphone</button>
             </div>
@@ -97,7 +97,7 @@
             <video id="setup-preview" class="setup-preview" autoplay muted playsinline hidden></video>
             <div style="flex:1;min-width:240px">
               <label class="agree"><input type="checkbox" id="agree">
-                <span>I have read and understood the instructions. I agree that my webcam, microphone and screen will be monitored and recorded during the test, and that any violation may lead to automatic submission.</span></label>
+                <span>I have read and understood the instructions. I agree that my webcam, microphone and screen will be monitored during the test, and that any violation may lead to automatic submission.</span></label>
               <button class="primary lg block" id="btn-start" disabled>I am ready to begin</button>
               <p class="error-text" id="setup-error" role="alert"></p>
             </div>
@@ -237,7 +237,6 @@
   </div>
 
   <video id="screen-video" class="offscreen" autoplay muted playsinline></video>
-  <canvas id="snap-canvas" hidden></canvas>
 
   <!-- Blocking overlay (full-screen exit, camera/screen stopped, extra display) -->
   <div id="overlay" class="overlay" hidden>
