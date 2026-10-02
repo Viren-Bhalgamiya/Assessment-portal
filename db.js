@@ -8,7 +8,9 @@ const fs = require('fs');
 const path = require('path');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const DRIVER = process.env.DATABASE_URL ? 'pg' : 'sqlite';
+// PostgreSQL is configured either with separate settings (PGHOST, PGUSER, PGPASSWORD, PGDATABASE,
+// optional PGPORT) — the password is then used exactly as typed — or with one DATABASE_URL.
+const DRIVER = process.env.PGHOST || process.env.DATABASE_URL ? 'pg' : 'sqlite';
 
 const DEFAULT_SETTINGS = {
   exam_open: '0',
@@ -199,10 +201,21 @@ function pgDriver() {
   // COUNT(*) and BIGINT columns come back as strings by default; every value here fits in a JS number.
   pg.types.setTypeParser(20, (v) => Number(v));     // int8
   pg.types.setTypeParser(1700, (v) => Number(v));   // numeric
-  const ssl = /sslmode=disable/.test(process.env.DATABASE_URL) || process.env.PGSSL === '0' ? false : { rejectUnauthorized: false };
+  const url = process.env.PGHOST ? null : process.env.DATABASE_URL;
+  // Azure requires SSL; a local server without SSL is used with PGSSLMODE=disable (or ?sslmode=disable).
+  const noSsl = process.env.PGSSLMODE === 'disable' || process.env.PGSSL === '0' || /sslmode=disable/.test(url || '');
+  const conn = url
+    ? { connectionString: url.replace(/[?&]sslmode=[^&]*/, '') }
+    : {
+      host: process.env.PGHOST,
+      port: Number(process.env.PGPORT) || 5432,
+      user: process.env.PGUSER,
+      password: process.env.PGPASSWORD,
+      database: process.env.PGDATABASE || 'portal',
+    };
   const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL.replace(/[?&]sslmode=[^&]*/, ''),
-    ssl,
+    ...conn,
+    ssl: noSsl ? false : { rejectUnauthorized: false },
     max: Number(process.env.PG_POOL_MAX) || 20,
     idleTimeoutMillis: 30000,
   });

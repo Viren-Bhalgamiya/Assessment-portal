@@ -10,7 +10,7 @@ It needs three Azure resources:
 | **Storage account** (Blob Storage) | Webcam/screen snapshots, audio clips, use-case PDFs | Standard, LRS |
 | **App Service** (Linux, Node) | The portal itself | **P0v3** or **B2** (B1 is enough for testing) |
 
-When the app sees the `DATABASE_URL` and `AZURE_STORAGE_CONNECTION_STRING` settings, it uses PostgreSQL and Blob Storage automatically. Without them it falls back to SQLite and the local disk, which is how it runs locally.
+When the app sees the `PGHOST` (or `DATABASE_URL`) and `AZURE_STORAGE_CONNECTION_STRING` settings, it uses PostgreSQL and Blob Storage automatically. Without `AZURE_STORAGE_CONNECTION_STRING`, files go to `DATA_DIR` (set it to `/home/data` on App Service). Without them it falls back to SQLite and the local disk, which is how it runs locally.
 
 Create all three resources in the **same region** and the **same resource group**, for example `assessment-portal-rg` in Central India.
 
@@ -30,11 +30,7 @@ Create all three resources in the **same region** and the **same resource group*
    - Tick **Allow public access from any Azure service within Azure to this server**.
 4. Click **Review + create**, then **Create**. It takes about 5–10 minutes.
 5. When it is ready, open the server → **Databases** → **+ Add** → name it `portal` → **Save**.
-6. Your `DATABASE_URL` is:
-   ```
-   postgres://<admin-user>:<password>@<server-name>.postgres.database.azure.com:5432/portal?sslmode=require
-   ```
-   If the password contains special characters such as `@ # / : ?`, URL-encode them. For example, `@` becomes `%40`.
+6. Note the server's **Server name** from its **Overview** page (`<server-name>.postgres.database.azure.com`), plus the admin login and password. They go into the App Service settings in step 3.1.
 
 The app creates all its tables itself the first time it starts.
 
@@ -68,7 +64,10 @@ Open the Web App → **Settings → Environment variables** → **App settings**
 
 | Name | Value |
 |---|---|
-| `DATABASE_URL` | the connection string from step 1 |
+| `PGHOST` | `<server-name>.postgres.database.azure.com` |
+| `PGUSER` | the PostgreSQL admin login |
+| `PGPASSWORD` | the PostgreSQL admin password, exactly as typed (any characters are fine) |
+| `PGDATABASE` | `portal` |
 | `AZURE_STORAGE_CONNECTION_STRING` | the connection string from step 2 |
 | `ADMIN_USERNAME` | the admin login, e.g. `admin` |
 | `ADMIN_PASSWORD` | a strong admin password. It is used only to create the first admin. |
@@ -146,7 +145,7 @@ The App Service can serve the pages itself, so this is optional. To serve the pa
 
 | Symptom | Fix |
 |---|---|
-| Site shows "Application Error" | Open **Log stream**. Usually `DATABASE_URL` is wrong: check the password encoding and that the `portal` database exists. |
+| Site shows "Application Error" or 503 | Open **Log stream** and look for `Startup failed:`. Usually a `PG…` setting is wrong, or the `portal` database doesn't exist. |
 | `no pg_hba.conf entry` or a timeout connecting to the database | PostgreSQL → **Networking** → tick **Allow public access from any Azure service**. |
 | Can't sign in (the page reloads to the login page) | Make sure you are using the `https://` address. `COOKIE_SECURE=1` needs HTTPS. |
 | Tests are not auto-submitted when time runs out | Turn **Always On** on. |
