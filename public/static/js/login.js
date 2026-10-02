@@ -22,7 +22,7 @@ loadBranding().then((info) => {
       'Use a laptop or desktop computer with a stable internet connection.',
       'After signing in and starting the round, you will be assigned one use case at random. The timer starts when you click "Start".',
       'Submit one link to your solution (for example a GitHub repository, Google Drive folder or deployed app) before the time ends. Make sure the link can be opened without signing in.',
-      'You can submit only once. Do not share your roll number or password.',
+      'You can submit only once. Do not share your email ID or password.',
     ].map((t) => h('li', null, t)));
     $('#fact-q-label').textContent = 'Test type';
     $('#fact-q').textContent = 'Use-case round';

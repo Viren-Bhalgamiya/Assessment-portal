@@ -127,7 +127,7 @@ function renderResults() {
   }, label + (A.sort.key === sortKey ? (A.sort.dir > 0 ? ' ▲' : ' ▼') : ''));
 
   const head = h('tr', null,
-    th('Roll No.', 'username'), th('Candidate Name', 'name'), th('Status', 'status'),
+    th('Email ID', 'username'), th('Candidate Name', 'name'), th('Status', 'status'),
     th(`Score /${maxScore}`, 'score', true),
     sections.map((s) => th(`${s.title} /${s.maxScore}`, `sec:${s.key}`, true)),
     th('Violations', 'violations', true), th('Time Left / Submitted At'), th('Remarks'), th(''));
@@ -163,7 +163,7 @@ function renderStudents() {
   $('#tab-pending').hidden = !pending.length;
   $('#btn-approve-all').disabled = !pending.length;
   $('#pending-table').replaceChildren(
-    h('thead', null, h('tr', null, h('th', null, 'Roll no'), h('th', null, 'Name'), h('th', null, 'Registered at'), h('th', null, 'Actions'))),
+    h('thead', null, h('tr', null, h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Registered at'), h('th', null, 'Actions'))),
     h('tbody', null, pending.length ? pending.map((s) => h('tr', null,
       h('td', null, h('strong', null, s.username)),
       h('td', null, h('span', { class: 'cell-user' }, avatar(s.name, s.username), s.name)),
@@ -175,7 +175,7 @@ function renderStudents() {
 
   const rows = filteredStudents($('#student-search').value, '', '').filter((s) => s.approval !== 'pending');
   $('#students-table').replaceChildren(
-    h('thead', null, h('tr', null, h('th', null, 'Roll no'), h('th', null, 'Name'), h('th', null, 'Approval'), h('th', null, 'Exam'), h('th', null, 'Actions'))),
+    h('thead', null, h('tr', null, h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Approval'), h('th', null, 'Exam'), h('th', null, 'Actions'))),
     h('tbody', null, rows.length ? rows.map((s) => h('tr', null,
       h('td', null, h('strong', null, s.username)),
       h('td', null, h('span', { class: 'cell-user' }, avatar(s.name, s.username), s.name)),
@@ -213,7 +213,7 @@ function showCredentials(title, created, skipped = []) {
   const box = $('#create-result');
   const download = () => {
     const esc = (v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-    const text = ['Roll No,Name,Password', ...created.map((c) => [c.username, c.name, c.password].map(esc).join(','))].join('\r\n');
+    const text = ['Email ID,Name,Password', ...created.map((c) => [c.username, c.name, c.password].map(esc).join(','))].join('\r\n');
     const a = h('a', { href: URL.createObjectURL(new Blob(['\uFEFF' + text], { type: 'text/csv' })), download: 'student-credentials.csv' });
     document.body.append(a);
     a.click();
@@ -223,11 +223,11 @@ function showCredentials(title, created, skipped = []) {
     h('h3', { class: 'section-title', style: 'margin-bottom:6px' }, title),
     created.length ? h('p', { class: 'muted', style: 'margin:0 0 12px' }, 'Share these sign-in details with the students. Passwords cannot be viewed again later, so download them now.') : null,
     created.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
-      h('thead', null, h('tr', null, h('th', null, 'Roll no'), h('th', null, 'Name'), h('th', null, 'Password'))),
+      h('thead', null, h('tr', null, h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Password'))),
       h('tbody', null, created.map((c) => h('tr', null, h('td', null, h('strong', null, c.username)), h('td', null, c.name), h('td', null, h('code', null, c.password))))))) : null,
     skipped.length ? h('div', { class: 'alert warn', style: 'margin:12px 0 0' }, icon('alert'), h('div', null,
       h('strong', null, `Skipped ${skipped.length}:`),
-      h('ul', { style: 'margin:4px 0 0;padding-left:18px' }, skipped.map((x) => h('li', null, `${x.username || '(blank roll number)'}: ${x.reason}`))))) : null,
+      h('ul', { style: 'margin:4px 0 0;padding-left:18px' }, skipped.map((x) => h('li', null, `${x.username || '(blank email ID)'}: ${x.reason}`))))) : null,
     h('div', { style: 'margin-top:12px;display:flex;gap:10px' },
       created.length ? h('button', { class: 'primary', onclick: download }, icon('download'), 'Download sign-in details (CSV)') : null,
       h('button', { onclick: () => { box.hidden = true; } }, 'Hide')));
@@ -835,7 +835,7 @@ function renderUcResults() {
         r.status === 'in_progress' && h('button', { class: 'small danger', onclick: () => ucForceSubmit(r) }, 'Close Attempt')));
   });
   $('#uc-table').replaceChildren(
-    h('thead', null, h('tr', null, ['Roll No.', 'Candidate Name', 'Status', 'Use Case', 'Time Left / Submitted At', 'Solution Link', 'Marks', 'Remarks', ''].map((t) => h('th', null, t)))),
+    h('thead', null, h('tr', null, ['Email ID', 'Candidate Name', 'Status', 'Use Case', 'Time Left / Submitted At', 'Solution Link', 'Marks', 'Remarks', ''].map((t) => h('th', null, t)))),
     h('tbody', null, body.length ? body : h('tr', null, h('td', { colspan: 9, class: 'empty' }, 'No candidates match.'))));
 }
 

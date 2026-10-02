@@ -2,7 +2,7 @@
 
 A proctored multiple-choice exam portal.
 
-- **Students** register with their roll number, wait for admin approval, then pass device checks: camera, entire-screen share and a single monitor. They take the exam in fullscreen in a standard CBT layout, with section tabs, a question palette, mark-for-review and a server-side timer.
+- **Students** register with their email ID, wait for admin approval, then pass device checks: camera, entire-screen share and a single monitor. They take the exam in fullscreen in a standard CBT layout, with section tabs, a question palette, mark-for-review and a server-side timer.
 - **Admins** approve registrations, manage the question bank, open or close the exam, watch attempts live, and see scores, answers, warnings and camera/screen snapshots.
 - **Students never see their score.** The answer key never leaves the server.
 
@@ -88,7 +88,7 @@ That test ran on a multi-core laptop. On Render's 1-CPU *Standard* plan the exam
 
 ## Running an exam
 
-1. Students open the site, choose **Register**, and enter roll number, name and password. They see "Waiting for approval".
+1. Students open the site, choose **Register**, and enter email ID, name and password. They see "Waiting for approval".
 2. **Students & approvals:** approve each student, or use **Approve all**. The student's page moves on by itself. Turn **Registration is open** off once everyone has registered.
 3. **Questions:** add, edit or delete questions (code, statements, four options, the correct answer, a worked solution, and the question's marks: marks for a correct answer and negative marks for a wrong one, default +4 / −1, decimals allowed). **Set marks** on a section changes all its questions at once. Adding and deleting are disabled while students are mid-exam. Changing a correct answer or marks re-scores submitted exams.
 4. **Exam settings:** timing, warning limit (1–3, default 3) and snapshot interval (default 60 s). Turn **Exam is open** on when students should start. Timing is one of:

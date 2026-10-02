@@ -96,13 +96,13 @@ Sign in at http://localhost:3000 with the admin account you created.
 
 | # | Do this | Expected result |
 |---|---|---|
-| C1 | In the candidate browser, open http://localhost:3000, choose **Register**, and enter a roll number (e.g. `21CS1001`), name and password. | Registration succeeds. After signing in the candidate sees **Registration Awaiting Approval**. |
+| C1 | In the candidate browser, open http://localhost:3000, choose **Register**, and enter an email ID (e.g. `asha.verma@college.edu`), name and password. | Registration succeeds. After signing in the candidate sees **Registration Awaiting Approval**. |
 | C2 | Admin: **Candidates** tab. | The candidate is listed under **Registrations Pending Approval**. |
 | C3 | Click **Approve**. | Within about 5 seconds the candidate's page moves on by itself to the instructions page. |
 | C4 | Register 2 more candidates, then click **Approve All**. | Both are approved. |
 | C5 | Register one more and click **Reject**. | That candidate sees **Registration Not Approved**. |
-| C6 | Admin: **Add Candidate**. Enter a roll number and name, leave the password blank, and click **Add Candidate**. | A generated password is shown. The candidate can sign in with it straight away, with no approval needed. |
-| C7 | Admin: **Bulk Upload Candidates**. Paste a few lines like `21CS2001, Asha Verma, Asha@2026` and click **Upload Candidates**. | All are created and their passwords are shown. |
+| C6 | Admin: **Add Candidate**. Enter an email ID and name, leave the password blank, and click **Add Candidate**. | A generated password is shown. The candidate can sign in with it straight away, with no approval needed. |
+| C7 | Admin: **Bulk Upload Candidates**. Paste a few lines like `asha.verma@college.edu, Asha Verma, Asha@2026` and click **Upload Candidates**. | All are created and their passwords are shown. |
 | C8 | **Reset Password** on a candidate. | A new password is shown, and the old one stops working. |
 | C9 | Sign in as the same candidate in two browsers. | Only the latest sign-in stays active. |
 
@@ -217,7 +217,7 @@ Try these on other fresh candidates. Each is also one warning, and the test stay
 | U17 | Enter marks (e.g. 75) and a remark, then click **Save**. | "Marks saved". The candidate shows **Evaluated**, and the average and highest marks update. |
 | U18 | Try marks above the maximum (e.g. 150) or below 0. | It is refused. |
 | U19 | **Close Attempt** on a candidate who is in progress. | Their attempt ends. They can't submit any more. |
-| U20 | **Export Results (CSV).** | The CSV includes the roll number, name, use case, link, marks and remarks. |
+| U20 | **Export Results (CSV).** | The CSV includes the email ID, name, use case, link, marks and remarks. |
 | U21 | **Candidates → Allow Re-attempt.** | The candidate can start again with a new random use case. |
 | U22 | **Use Cases:** try to delete a use case that has been assigned. | Delete is disabled or refused. |
 

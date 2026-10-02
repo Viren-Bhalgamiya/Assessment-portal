@@ -432,7 +432,9 @@ app.post('/api/login', safe(async (req, res) => {
   res.json({ role: user.role });
 }));
 
-const USERNAME_RE = /^[A-Za-z0-9._-]{2,40}$/;
+// Students sign in with their email address (stored lower-case in users.username).
+const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]{2,}$/;
+const validEmail = (v) => v.length <= 254 && EMAIL_RE.test(v);
 const registrations = new Map(); // ip -> { count, until }
 
 // A whole college lab usually shares one public IP, so the per-IP cap is generous; the admin approves every registration anyway.
@@ -443,14 +445,14 @@ app.post('/api/register', safe(async (req, res) => {
   const r = registrations.get(req.ip);
   if (r && r.until > now() && r.count >= REGISTRATIONS_PER_IP_PER_HOUR) return res.status(429).json({ error: 'Too many registrations from this network. Try again later.' });
 
-  const username = String(req.body?.username || '').trim();
+  const username = String(req.body?.username || '').trim().toLowerCase();
   const name = String(req.body?.name || '').trim().replace(/\s+/g, ' ');
   const password = String(req.body?.password || '');
-  if (!USERNAME_RE.test(username)) return res.status(400).json({ error: 'Enter your roll number (2–40 letters or digits; . _ - allowed).' });
+  if (!validEmail(username)) return res.status(400).json({ error: 'Enter a valid email ID (for example name@college.edu).' });
   if (name.length < 2 || name.length > 100) return res.status(400).json({ error: 'Enter your full name.' });
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
   if (await sql('SELECT 1 FROM users WHERE lower(username) = lower(?)').get(username)) {
-    return res.status(409).json({ error: 'This roll number is already registered. Sign in instead, or contact the examiner.' });
+    return res.status(409).json({ error: 'This email ID is already registered. Sign in instead, or contact the examiner.' });
   }
 
   const passwordHash = await hashPassword(password);
@@ -459,7 +461,7 @@ app.post('/api/register', safe(async (req, res) => {
     userId = await sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'pending', ?)")
       .insert(username, name, passwordHash, now());
   } catch (e) {
-    if (isUniqueError(e)) return res.status(409).json({ error: 'This roll number is already registered. Sign in instead, or contact the examiner.' });
+    if (isUniqueError(e)) return res.status(409).json({ error: 'This email ID is already registered. Sign in instead, or contact the examiner.' });
     throw e;
   }
   registrations.set(req.ip, { count: (r && r.until > now() ? r.count : 0) + 1, until: now() + 3600 * 1000 });
@@ -884,14 +886,14 @@ admin.post('/students', safe(async (req, res) => {
   const skipped = [];
   const seen = new Set();
   for (const raw of list) {
-    const username = String(raw?.username || '').trim();
+    const username = String(raw?.username || '').trim().toLowerCase();
     const name = String(raw?.name || '').trim().replace(/\s+/g, ' ').slice(0, 100);
     let password = String(raw?.password || '').trim();
-    if (!USERNAME_RE.test(username)) { skipped.push({ username, reason: 'Invalid roll number (2–40 letters, digits, . _ -)' }); continue; }
+    if (!validEmail(username)) { skipped.push({ username, reason: 'Invalid email ID' }); continue; }
     if (name.length < 2) { skipped.push({ username, reason: 'Name is required' }); continue; }
     if (password && password.length < 6) { skipped.push({ username, reason: 'Password must be at least 6 characters' }); continue; }
     if (seen.has(username.toLowerCase()) || await sql('SELECT 1 FROM users WHERE lower(username) = lower(?)').get(username)) {
-      skipped.push({ username, reason: 'Roll number already exists' });
+      skipped.push({ username, reason: 'Email ID already exists' });
       continue;
     }
     seen.add(username.toLowerCase());
@@ -901,7 +903,7 @@ admin.post('/students', safe(async (req, res) => {
         .run(username, name, await hashPassword(password), now());
       created.push({ username, name, password });
     } catch (e) {
-      if (isUniqueError(e)) skipped.push({ username, reason: 'Roll number already exists' });
+      if (isUniqueError(e)) skipped.push({ username, reason: 'Email ID already exists' });
       else throw e;
     }
   }
@@ -1204,7 +1206,7 @@ admin.get('/export.csv', async (req, res) => {
   const iso = (t) => (t ? new Date(t).toISOString() : '');
   if (getSettings().examMode === 'usecase') {
     const max = getSettings().ucMaxMarks;
-    const lines = [['Roll No', 'Name', 'Status', 'Use Case', 'Solution Link', `Marks (/${max})`, 'Remarks', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'].map(cell).join(',')];
+    const lines = [['Email ID', 'Name', 'Status', 'Use Case', 'Solution Link', `Marks (/${max})`, 'Remarks', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'].map(cell).join(',')];
     for (const r of await ucResults()) {
       lines.push([r.username, r.name, r.status, r.usecase || '', r.url || '', r.marks ?? '', r.remarks || '', iso(r.startedAt), iso(r.submittedAt), r.submitReason || ''].map(cell).join(','));
     }
@@ -1212,7 +1214,7 @@ admin.get('/export.csv', async (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="use-case-results.csv"');
     return res.send('\uFEFF' + lines.join('\r\n'));
   }
-  const header = ['Roll No', 'Name', 'Status', `Score (/${bank().MAX_SCORE})`, ...bank().SECTIONS.map((s) => s.title),
+  const header = ['Email ID', 'Name', 'Status', `Score (/${bank().MAX_SCORE})`, ...bank().SECTIONS.map((s) => s.title),
     'Correct', 'Wrong', 'Unattempted', 'Warnings', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'];
   const rows = await sql(`
     SELECT u.username, u.name, a.status, a.score, a.section_scores, a.violations, a.started_at, a.submitted_at, a.submit_reason

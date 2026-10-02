@@ -34,7 +34,7 @@
       <div class="toolbar">
         <h3 class="section-title">Candidate Results</h3>
         <span class="spacer"></span>
-        <input type="text" id="search" placeholder="Search by roll number or name">
+        <input type="text" id="search" placeholder="Search by email ID or name">
         <select id="filter-status">
           <option value="">All statuses</option>
           <option value="in_progress">In progress</option>
@@ -51,7 +51,7 @@
         <div class="toolbar">
           <h3 class="section-title">Use-Case Round: Submissions &amp; Evaluation</h3>
           <span class="spacer"></span>
-          <input type="text" id="uc-search" placeholder="Search by roll number or name">
+          <input type="text" id="uc-search" placeholder="Search by email ID or name">
           <select id="uc-filter">
             <option value="">All statuses</option>
             <option value="in_progress">In progress</option>
@@ -74,7 +74,7 @@
         <div class="card">
           <h3 class="section-title" style="margin-bottom:12px">Add Candidate</h3>
           <form id="form-one" autocomplete="off">
-            <label class="field"><span>Roll Number</span><input type="text" id="one-roll" required placeholder="e.g. 21CS1001"></label>
+            <label class="field"><span>Email ID</span><input type="email" id="one-roll" required placeholder="e.g. name@college.edu"></label>
             <label class="field"><span>Full Name</span><input type="text" id="one-name" required placeholder="As per college records"></label>
             <label class="field"><span>Password <span class="muted" style="font-weight:400">(minimum 6 characters; leave blank to auto-generate)</span></span><input type="text" id="one-pass" placeholder="Password"></label>
             <button class="primary" type="submit">Add Candidate</button>
@@ -82,8 +82,8 @@
         </div>
         <div class="card">
           <h3 class="section-title" style="margin-bottom:6px">Bulk Upload Candidates</h3>
-          <p class="muted" style="margin:0 0 10px;font-size:13px">Enter one candidate per line in the format <code>roll number, name, password</code>. If the password is omitted, one is generated. Rows can be pasted directly from Excel.</p>
-          <textarea id="bulk" rows="7" spellcheck="false" placeholder="21CS1001, Asha Verma, Asha@2026&#10;21CS1002, Rahul Nair"></textarea>
+          <p class="muted" style="margin:0 0 10px;font-size:13px">Enter one candidate per line in the format <code>email ID, name, password</code>. If the password is omitted, one is generated. Rows can be pasted directly from Excel.</p>
+          <textarea id="bulk" rows="7" spellcheck="false" placeholder="asha.verma@college.edu, Asha Verma, Asha@2026&#10;rahul.nair@college.edu, Rahul Nair"></textarea>
           <div style="margin-top:10px"><button class="primary" id="btn-bulk">Upload Candidates</button></div>
         </div>
       </div>
@@ -91,7 +91,7 @@
 
       <div class="toolbar">
         <h3 class="section-title">Registrations Pending Approval <span class="badge warn" id="pending-count">0</span></h3>
-        <span class="muted" style="font-size:12.5px">Verify the roll number and name against college records before approving.</span>
+        <span class="muted" style="font-size:12.5px">Verify the email ID and name against college records before approving.</span>
         <span class="spacer"></span>
         <button class="primary" id="btn-approve-all">Approve All</button>
       </div>
@@ -99,7 +99,7 @@
       <div class="toolbar" style="margin-top:24px">
         <h3 class="section-title">Registered Candidates</h3>
         <span class="spacer"></span>
-        <input type="text" id="student-search" placeholder="Search by roll number or name">
+        <input type="text" id="student-search" placeholder="Search by email ID or name">
       </div>
       <div class="table-wrap"><table class="data" id="students-table"></table></div>
     </section>

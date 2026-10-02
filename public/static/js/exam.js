@@ -93,7 +93,7 @@ async function init() {
   }
   if (st.approval === 'pending') {
     showMessage('Registration Awaiting Approval',
-      `Dear ${S.me.name}, your registration (Roll No. ${S.me.username}) has been received and is awaiting approval by the examination authority. This page will update automatically once it is approved.`, { tone: 'wait' });
+      `Dear ${S.me.name}, your registration (${S.me.username}) has been received and is awaiting approval by the examination authority. This page will update automatically once it is approved.`, { tone: 'wait' });
     setTimeout(() => location.reload(), 5000);
     return;
   }
@@ -106,7 +106,7 @@ async function init() {
 }
 
 function showSetup(st) {
-  $('#setup-who').textContent = `${S.me.name} (Roll No. ${S.me.username})`;
+  $('#setup-who').textContent = `${S.me.name} (${S.me.username})`;
   $('#resume-note').hidden = st.status !== 'in_progress';
   // Resuming mid-exam: the clock is running, so leaving the page here is monitored too.
   S.resuming = st.status === 'in_progress';
@@ -1084,7 +1084,7 @@ const UC = { deadlineLocal: 0, timer: null, submitting: false };
 async function initUseCase() {
   const st = await api('GET', '/api/usecase/state');
   loadBranding();
-  $('#uc-who').textContent = `${S.me.name} (Roll No. ${S.me.username})`;
+  $('#uc-who').textContent = `${S.me.name} (${S.me.username})`;
   if (st.status === 'submitted') return ucSubmitted(st);
   if (st.status === 'in_progress') return ucWork(st);
   if (!st.examOpen) {
