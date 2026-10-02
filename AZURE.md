@@ -122,13 +122,25 @@ Give students the `https://…azurewebsites.net` address. They need Chrome or Ed
 
 ---
 
-## Optional: Static Web App in front
+## Frontend on Azure Static Web Apps (optional)
 
-You don't need one: the App Service already serves the pages. If you still want the pages on Azure Static Web Apps:
+The App Service can serve the pages itself, so this is optional. To serve the pages (the `public` folder) from a Static Web App, with the App Service as the backend:
 
-- Use the **Standard** plan and **link the App Service as the backend** (Static Web App → **APIs** → **Link**). Then `/api/*` is served from the same address, and the login cookie works.
-- The app location is `public`.
-- Set `TRUST_PROXY` to `2` on the App Service.
+1. **Create a resource** → **Static Web App** → **Create**.
+   - **Plan type:** **Standard**. This is required for linking a backend.
+   - **Deployment source:** GitHub → repository `Assessment-portal`, branch `main`.
+   - **Build presets:** Custom
+   - **App location:** `public`
+   - **Api location:** leave empty
+   - **Output location:** leave empty
+2. When it's created, open the Static Web App → **Settings → APIs** → on the **Production** row click **Link** → **Backend resource type:** Web App → choose the App Service → **Link**.
+   From now on, `https://<static-web-app>/api/*` is forwarded to the App Service on the same address, so the login cookie works.
+3. On the App Service, set `TRUST_PROXY` to **`2`** (Static Web App + App Service front end), then restart it.
+4. Give students the **Static Web App address**.
+
+`public/staticwebapp.config.json` maps `/exam` and `/admin` to their pages and sets the same security headers the App Service uses.
+
+> Linking restricts the App Service so it only accepts traffic through the Static Web App. Its own `*.azurewebsites.net` address then stops serving the portal directly, which is expected.
 
 ## Troubleshooting
 

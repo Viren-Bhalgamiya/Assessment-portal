@@ -1,0 +1,21 @@
+{
+  "routes": [
+    { "route": "/", "rewrite": "/login.html", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/exam", "rewrite": "/exam.html", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/admin", "rewrite": "/admin.html", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/login.html", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/exam.html", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/admin.html", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/static/*", "headers": { "Cache-Control": "no-cache" } },
+    { "route": "/staticwebapp.config.json", "statusCode": 404 }
+  ],
+  "globalHeaders": {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), fullscreen=(self)",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'"
+  },
+  "mimeTypes": {
+    ".json": "application/json"
+  }
+}
