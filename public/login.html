@@ -41,7 +41,7 @@
 
       <form id="register-form" autocomplete="off" hidden>
         <label class="field"><span>Roll Number</span>
-          <div class="input-icon"><input type="text" id="reg-roll" required autocapitalize="off" spellcheck="false" placeholder="As printed on your college ID"></div>
+          <div class="input-icon"><input type="text" id="reg-roll" required autocapitalize="off" spellcheck="false" minlength="2" maxlength="40" pattern="[A-Za-z0-9._-]{2,40}" title="2 to 40 letters, numbers, dots, hyphens, or underscores (no spaces)." placeholder="As printed on your college ID"></div>
         </label>
         <label class="field"><span>Full Name</span>
           <div class="input-icon"><input type="text" id="reg-name" required placeholder="As per college records"></div>
