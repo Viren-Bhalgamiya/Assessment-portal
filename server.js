@@ -428,7 +428,7 @@ app.get('/api/registration', (req, res) => {
   res.json({
     orgName: st.orgName, examName: st.examName,
     mode: st.examMode, useCaseMaxMarks: st.ucMaxMarks,
-    open: st.registrationOpen, questionCount: BY_ID.size,
+    open: st.registrationOpen, examOpen: st.examOpen, questionCount: BY_ID.size,
     durationMin: st.examMode === 'usecase' ? st.ucDurationMin : effectiveDurationMin(), maxWarnings: st.maxViolations,
     marking: uniformMarking(), maxScore: bank().MAX_SCORE,
     subjects: SECTIONS.filter((x) => x.items.length).map((x) => x.title.replace(/^Section [A-Z0-9]+: /, '')),

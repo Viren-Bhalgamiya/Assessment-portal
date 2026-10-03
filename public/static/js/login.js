@@ -16,6 +16,14 @@ fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : 
 
 loadBranding().then((info) => {
   if (!info) return;
+  const statusCell = $('#fact-status');
+  if (statusCell) statusCell.textContent = info.examOpen ? 'Open for testing' : 'Not yet opened';
+  const badge = $('#exam-status-badge');
+  if (badge) {
+    badge.textContent = info.examOpen ? 'Exam Open' : 'Exam Not Started';
+    badge.className = 'alert ' + (info.examOpen ? 'ok' : 'info');
+    badge.hidden = false;
+  }
   if (!info.open) {
     $('#tab-register').hidden = true;
     const notice = $('#reg-closed-notice');

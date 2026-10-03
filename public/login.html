@@ -26,6 +26,7 @@
         <button type="button" id="tab-register">New Registration</button>
       </div>
       <div id="reg-closed-notice" class="alert info" role="status" hidden></div>
+      <div id="exam-status-badge" class="badge-row" hidden></div>
 
       <form id="login-form" autocomplete="off">
         <label class="field"><span>Roll Number</span>
@@ -69,6 +70,7 @@
           <li>Do not share your roll number or password. Only one sign-in is allowed at a time.</li>
         </ol>
         <table class="facts-table">
+          <tr><th>Exam status</th><td id="fact-status">—</td></tr>
           <tr><th id="fact-q-label">Number of questions</th><td id="fact-q">—</td></tr>
           <tr><th>Duration (minutes)</th><td id="fact-t">—</td></tr>
           <tr><th>Marking scheme</th><td id="fact-m">—</td></tr>
