@@ -912,8 +912,13 @@ function openUseCaseEditor(u) {
     save.disabled = true;
     try {
       let id = u?.id;
-      if (u) await api('PUT', `/api/admin/usecases/${id}`, { title: title.value, description: desc.value });
-      else id = (await api('POST', '/api/admin/usecases', { title: title.value, description: desc.value })).id;
+      if (u) {
+        await api('PUT', `/api/admin/usecases/${id}`, { title: title.value, description: desc.value });
+      } else {
+        id = (await api('POST', '/api/admin/usecases', { title: title.value, description: desc.value })).id;
+        // Adopt the newly created row so a subsequent PDF retry updates it instead of inserting a duplicate.
+        u = { id, title: title.value, description: desc.value };
+      }
       if (f) await uploadPdf(id, f);
       else if (removePdf) await api('DELETE', `/api/admin/usecases/${id}/pdf`);
       toast(u ? 'Use case updated.' : 'Use case added.');
