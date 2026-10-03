@@ -135,5 +135,6 @@ async function loadBranding() {
 
 async function logout() {
   try { await api('POST', '/api/logout'); } catch { /* ignore */ }
+  try { sessionStorage.clear(); } catch { /* ignore */ }
   location.href = '/';
 }
