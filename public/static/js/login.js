@@ -16,7 +16,14 @@ fetch('/api/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : 
 
 loadBranding().then((info) => {
   if (!info) return;
-  if (!info.open) $('#tab-register').hidden = true;
+  if (!info.open) {
+    $('#tab-register').hidden = true;
+    const notice = $('#reg-closed-notice');
+    if (notice) {
+      notice.textContent = 'Self-registration is currently closed by the examination authority. If you already have credentials, sign in below.';
+      notice.hidden = false;
+    }
+  }
   if (info.mode === 'usecase') {
     $('#login-rules').replaceChildren(...[
       'Use a laptop or desktop computer with a stable internet connection.',
