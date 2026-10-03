@@ -74,6 +74,7 @@ $('#register-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = $('#reg-btn');
   const errEl = $('#reg-error');
+  errEl.className = 'error-text';
   errEl.textContent = '';
   if ($('#reg-pass').value !== $('#reg-pass2').value) {
     errEl.textContent = 'The passwords do not match.';
@@ -86,7 +87,9 @@ $('#register-form').addEventListener('submit', async (e) => {
       name: $('#reg-name').value.trim(),
       password: $('#reg-pass').value,
     });
-    location.href = '/exam';
+    errEl.className = 'success-text';
+    errEl.textContent = 'Registration submitted successfully. Redirecting to your verification portal…';
+    setTimeout(() => { location.href = '/exam'; }, 1500);
   } catch (err) {
     errEl.textContent = err.message;
     btn.disabled = false;
