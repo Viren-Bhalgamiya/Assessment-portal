@@ -405,7 +405,7 @@ function renderDrawer(d, openQids) {
       return h('div', { class: 'sec-bar' },
         h('div', { class: 'top' }, h('strong', null, s.title.replace(/^Section /, '')),
           h('span', null, `${r.score} / ${s.maxScore} · ${r.correct} correct · ${r.wrong} wrong · ${r.unattempted} skipped`)),
-        h('div', { class: 'track' }, h('div', { class: 'fill' + (r.score < 0 ? ' neg' : ''), style: `width:${Math.max(3, (Math.abs(r.score) / s.maxScore) * 100)}%` })));
+        h('div', { class: 'track' }, h('div', { class: 'fill' + (r.score < 0 ? ' neg' : ''), style: `width:${s.maxScore > 0 ? Math.min(100, Math.max(3, (Math.abs(r.score) / s.maxScore) * 100)) : 0}%` })));
     })));
 
   const counted = d.events.filter((e) => e.counted).length;
