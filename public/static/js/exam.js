@@ -113,9 +113,11 @@ function showSetup(st) {
   if (S.resuming) {
     S.violations = st.violations;
     S.maxViolations = st.maxViolations;
+    const violationMsg = st.violations > 0
+      ? `You currently have ${st.violations}${st.maxViolations > 0 ? ` of ${st.maxViolations}` : ''} violation${st.violations === 1 ? '' : 's'} recorded.`
+      : 'No violations are currently recorded.';
     $('#resume-note').replaceChildren(icon('alert'), h('span', null,
-      `You have already started this test. Re-opening the test page has been recorded as violation ${st.violations}` +
-      (st.maxViolations > 0 ? ` of ${st.maxViolations}` : '') + '. Your saved responses and remaining time will be restored.'));
+      `You have resumed an in-progress test. ${violationMsg} Your saved responses and remaining time have been restored.`));
   }
   loadBranding().then((info) => { if (info) $('#hero-subjects').textContent = `Sections: ${info.subjects.join(', ')}.`; });
   $('#hs-q').textContent = st.questionCount;
