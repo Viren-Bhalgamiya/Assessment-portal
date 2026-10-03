@@ -927,10 +927,18 @@ admin.post('/students/:id/reset-attempt', (req, res) => {
 });
 
 admin.post('/students/:id/force-submit', (req, res) => {
-  const att = sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(Number(req.params.id));
-  if (!att) return res.status(404).json({ error: 'No exam in progress for this student.' });
-  finalize(att.id, 'admin');
-  res.json({ ok: true });
+  const userId = Number(req.params.id);
+  const mcq = sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(userId);
+  if (mcq) {
+    finalize(mcq.id, 'admin');
+    return res.json({ ok: true });
+  }
+  const ucAtt = sql("SELECT id FROM uc_attempts WHERE user_id = ? AND status = 'in_progress'").get(userId);
+  if (ucAtt) {
+    sql("UPDATE uc_attempts SET status = 'submitted', submitted_at = ?, submit_reason = 'admin' WHERE id = ?").run(now(), ucAtt.id);
+    return res.json({ ok: true });
+  }
+  res.status(404).json({ error: 'No exam in progress for this student.' });
 });
 
 admin.delete('/students/:id', (req, res) => {
