@@ -185,8 +185,8 @@ function validSectionName(name) {
 }
 
 // Question-id prefix from the initials of the name, e.g. "Data Structures" -> "DS", kept unique.
-function makePrefix(name) {
-  const taken = new Set(sql('SELECT prefix FROM sections').all().map((r) => r.prefix));
+function makePrefix(name, excludeKey = null) {
+  const taken = new Set(sql('SELECT key, prefix FROM sections').all().filter((r) => r.key !== excludeKey).map((r) => r.prefix));
   const words = name.toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
   let base = words.length > 1 ? words.map((w) => w[0]).join('').slice(0, 3) : (words[0] || 'S').slice(0, 3);
   if (/^\d/.test(base)) base = `S${base}`;
@@ -214,7 +214,8 @@ function renameSection(key, rawName) {
   if (String(rawName || '').trim().toLowerCase() === current.title.toLowerCase()) return { ok: true };
   const { name, error } = validSectionName(rawName);
   if (error) return { error };
-  sql('UPDATE sections SET name = ? WHERE key = ?').run(name, key);
+  const newPrefix = makePrefix(name, key);
+  sql('UPDATE sections SET name = ?, prefix = ? WHERE key = ?').run(name, newPrefix, key);
   invalidate();
   return { ok: true };
 }
