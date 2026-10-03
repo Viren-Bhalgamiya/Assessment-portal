@@ -91,7 +91,18 @@ $('#register-form').addEventListener('submit', async (e) => {
     errEl.textContent = 'Registration submitted successfully. Redirecting to your verification portal…';
     setTimeout(() => { location.href = '/exam'; }, 1500);
   } catch (err) {
-    errEl.textContent = err.message;
+    if (err.status === 409) {
+      errEl.textContent = '';
+      const rollValue = $('#reg-roll').value.trim();
+      const switchBtn = h('button', { type: 'button', class: 'small', onclick: () => {
+        showTab('login');
+        $('#username').value = rollValue;
+        $('#password').focus();
+      } }, 'Sign In Now');
+      errEl.append(document.createTextNode(err.message + ' '), switchBtn);
+    } else {
+      errEl.textContent = err.message;
+    }
     btn.disabled = false;
   }
 });
