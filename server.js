@@ -1040,6 +1040,9 @@ admin.put('/questions/:id', (req, res) => {
   if (current.section !== value.section && liveAttempts()) {
     return res.status(409).json({ error: 'Students are taking the exam right now, so a question cannot move to another section.' });
   }
+  if (liveAttempts() && (JSON.stringify(current.o) !== JSON.stringify(value.options) || current.correct !== value.answer)) {
+    return res.status(409).json({ error: 'Candidates are taking the exam right now. You can fix typos in the question stem, but options and answer keys cannot be modified during live tests.' });
+  }
   updateQuestion(req.params.id, value);
   rescoreSubmitted();
   res.json({ ok: true });
