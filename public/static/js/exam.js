@@ -83,6 +83,13 @@ async function init() {
   S.me = await api('GET', '/api/me');
   if (S.me.role === 'admin') return location.replace('/admin');
   const st = await api('GET', '/api/exam/status');
+  if (st.approval === 'pending') {
+    showMessage('Registration Awaiting Approval',
+      `Dear ${S.me.name}, your registration (Roll No. ${S.me.username}) has been received and is awaiting approval by the examination authority. This page will update automatically once it is approved.`, { tone: 'wait' });
+    setTimeout(() => location.reload(), 5000);
+    return;
+  }
+  if (st.approval === 'rejected') return showMessage('Registration Not Approved', 'Your registration has not been approved. Please contact the examination authority.', { tone: 'danger', ic: 'x' });
   if (st.approval === 'approved' && st.mode === 'usecase') return initUseCase();
   if (!window.isSecureContext) {
     return showMessage('Secure Connection Required', 'This test must be opened over a secure (HTTPS) connection so that the webcam and screen sharing can work. Please contact the examination authority.', { tone: 'danger', ic: 'lock' });
@@ -91,13 +98,6 @@ async function init() {
       !navigator.mediaDevices?.getUserMedia || !document.documentElement.requestFullscreen) {
     return showMessage('Unsupported Device or Browser', 'This test can only be taken on a laptop or desktop computer using the latest Google Chrome or Microsoft Edge.', { tone: 'danger', ic: 'monitor' });
   }
-  if (st.approval === 'pending') {
-    showMessage('Registration Awaiting Approval',
-      `Dear ${S.me.name}, your registration (Roll No. ${S.me.username}) has been received and is awaiting approval by the examination authority. This page will update automatically once it is approved.`, { tone: 'wait' });
-    setTimeout(() => location.reload(), 5000);
-    return;
-  }
-  if (st.approval === 'rejected') return showMessage('Registration Not Approved', 'Your registration has not been approved. Please contact the examination authority.', { tone: 'danger', ic: 'x' });
   if (st.status === 'submitted') return showSubmitted(st.violations >= st.maxViolations && st.maxViolations > 0 ? 'terminated' : 'already');
   if (st.status === 'none' && !st.examOpen) {
     return showMessage('Test Not Yet Started', 'The test has not been opened yet. Please wait for the invigilator\'s instruction and click Refresh.', { refresh: true, tone: 'info', ic: 'clock' });
