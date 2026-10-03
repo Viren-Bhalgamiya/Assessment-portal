@@ -691,7 +691,7 @@ function currentUcAttempt(userId) {
 function ucState(userId) {
   const s = getSettings();
   const att = currentUcAttempt(userId);
-  const u = att && att.status === 'in_progress' && att.usecase_id ? uc.getUseCase(att.usecase_id) : null;
+  const u = att && att.usecase_id ? uc.getUseCase(att.usecase_id) : null;
   return {
     mode: s.examMode, examOpen: s.examOpen, durationMin: s.ucDurationMin, maxMarks: s.ucMaxMarks,
     useCaseCount: uc.listUseCases().length,
