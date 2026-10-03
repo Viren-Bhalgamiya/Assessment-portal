@@ -912,15 +912,18 @@ admin.post('/students/:id/password', safe(async (req, res) => {
 }));
 
 admin.post('/students/:id/reset-attempt', (req, res) => {
-  if (getSettings().examMode === 'usecase') {
-    const r = sql('DELETE FROM uc_attempts WHERE user_id = ?').run(Number(req.params.id));
-    return r.changes ? res.json({ ok: true }) : res.status(404).json({ error: 'This candidate has no use-case attempt.' });
+  const userId = Number(req.params.id);
+  const ucDeleted = sql('DELETE FROM uc_attempts WHERE user_id = ?').run(userId).changes;
+  const att = sql('SELECT id FROM attempts WHERE user_id = ?').get(userId);
+  let mcqDeleted = 0;
+  if (att) {
+    mcqDeleted = sql('DELETE FROM attempts WHERE id = ?').run(att.id).changes;
+    removeSnapshotDir(att.id);
   }
-  const att = sql('SELECT id FROM attempts WHERE user_id = ?').get(Number(req.params.id));
-  if (!att) return res.status(404).json({ error: 'This student has no attempt.' });
-  sql('DELETE FROM attempts WHERE id = ?').run(att.id);
-  removeSnapshotDir(att.id);
-  res.json({ ok: true });
+  if (!ucDeleted && !mcqDeleted) {
+    return res.status(404).json({ error: 'This candidate has no attempt records to reset.' });
+  }
+  res.json({ ok: true, reset: { uc: ucDeleted > 0, mcq: mcqDeleted > 0 } });
 });
 
 admin.post('/students/:id/force-submit', (req, res) => {
