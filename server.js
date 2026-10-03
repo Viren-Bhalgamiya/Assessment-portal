@@ -967,37 +967,59 @@ admin.get('/settings', (req, res) => res.json(getSettings()));
 admin.put('/settings', (req, res) => {
   const b = req.body || {};
   const errors = [];
+  const writes = [];
+  const queue = (key, value) => writes.push([key, value]);
   const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
-  if (b.examOpen !== undefined) setSetting('exam_open', b.examOpen ? '1' : '0');
-  if (b.registrationOpen !== undefined) setSetting('registration_open', b.registrationOpen ? '1' : '0');
-  if (b.durationMin !== undefined) intIn(b.durationMin, 1, 600) ? setSetting('duration_min', b.durationMin) : errors.push('Duration must be 1–600 minutes.');
-  if (b.maxViolations !== undefined) intIn(b.maxViolations, 1, MAX_WARNINGS) ? setSetting('max_violations', b.maxViolations) : errors.push(`Warning limit must be between 1 and ${MAX_WARNINGS}.`);
-  if (b.snapshotIntervalSec !== undefined) intIn(b.snapshotIntervalSec, 10, 600) ? setSetting('snapshot_interval_sec', b.snapshotIntervalSec) : errors.push('Snapshot interval must be 10–600 seconds.');
-  if (b.timingMode !== undefined) ['overall', 'section'].includes(b.timingMode) ? setSetting('timing_mode', b.timingMode) : errors.push('Unknown timing mode.');
+  const current = getSettings();
+  const prospective = { ...current };
+  const stage = (field, key, value) => { queue(key, value); prospective[field] = value; };
+
+  if (b.examOpen !== undefined) stage('examOpen', 'exam_open', b.examOpen ? 1 : 0);
+  if (b.registrationOpen !== undefined) stage('registrationOpen', 'registration_open', b.registrationOpen ? 1 : 0);
+  if (b.durationMin !== undefined) {
+    if (intIn(b.durationMin, 1, 600)) stage('durationMin', 'duration_min', b.durationMin);
+    else errors.push('Duration must be 1–600 minutes.');
+  }
+  if (b.maxViolations !== undefined) {
+    if (intIn(b.maxViolations, 1, MAX_WARNINGS)) stage('maxViolations', 'max_violations', b.maxViolations);
+    else errors.push(`Warning limit must be between 1 and ${MAX_WARNINGS}.`);
+  }
+  if (b.snapshotIntervalSec !== undefined) {
+    if (intIn(b.snapshotIntervalSec, 10, 600)) stage('snapshotIntervalSec', 'snapshot_interval_sec', b.snapshotIntervalSec);
+    else errors.push('Snapshot interval must be 10–600 seconds.');
+  }
+  if (b.timingMode !== undefined) {
+    if (['overall', 'section'].includes(b.timingMode)) stage('timingMode', 'timing_mode', b.timingMode);
+    else errors.push('Unknown timing mode.');
+  }
   for (const [field, key, label] of [['orgName', 'org_name', 'Organisation name'], ['examName', 'exam_name', 'Examination name']]) {
     if (b[field] === undefined) continue;
     const v = String(b[field]).trim().replace(/\s+/g, ' ');
     if (!v || v.length > 80) errors.push(`${label} must be 1–80 characters.`);
-    else setSetting(key, v);
+    else stage(field, key, v);
   }
   const liveTests = () => sql("SELECT (SELECT COUNT(*) FROM attempts WHERE status = 'in_progress') + (SELECT COUNT(*) FROM uc_attempts WHERE status = 'in_progress') AS n").get().n;
-  if (b.examMode !== undefined && b.examMode !== getSettings().examMode) {
+  if (b.examMode !== undefined && b.examMode !== current.examMode) {
     if (!['mcq', 'usecase'].includes(b.examMode)) errors.push('Unknown test type.');
     else if (liveTests()) errors.push('Candidates are taking a test right now. The test type can be changed after they finish.');
-    else setSetting('exam_mode', b.examMode);
+    else stage('examMode', 'exam_mode', b.examMode);
   }
-  if (b.ucDurationMin !== undefined) intIn(b.ucDurationMin, 1, 600) ? setSetting('uc_duration_min', b.ucDurationMin) : errors.push('Use-case duration must be 1–600 minutes.');
-  if (b.ucMaxMarks !== undefined) intIn(b.ucMaxMarks, 1, 1000) ? setSetting('uc_max_marks', b.ucMaxMarks) : errors.push('Use-case maximum marks must be 1–1000.');
-  const st = getSettings();
-  if (st.examMode === 'usecase' && st.examOpen && !uc.listUseCases().length) {
-    setSetting('exam_open', '0');
-    errors.push('Add at least one use case before opening the use-case round. The test was kept closed.');
+  if (b.ucDurationMin !== undefined) {
+    if (intIn(b.ucDurationMin, 1, 600)) stage('ucDurationMin', 'uc_duration_min', b.ucDurationMin);
+    else errors.push('Use-case duration must be 1–600 minutes.');
   }
-  if (st.examMode === 'mcq' && st.timingMode === 'section' && st.examOpen && sectionTimesMissing().length) {
-    setSetting('exam_open', '0');
-    errors.push(`Set a time for every section before opening the exam (missing: ${sectionTimesMissing().join(', ')}). The exam was kept closed.`);
+  if (b.ucMaxMarks !== undefined) {
+    if (intIn(b.ucMaxMarks, 1, 1000) ) stage('ucMaxMarks', 'uc_max_marks', b.ucMaxMarks);
+    else errors.push('Use-case maximum marks must be 1–1000.');
+  }
+  if (prospective.examMode === 'usecase' && prospective.examOpen && !uc.listUseCases().length) {
+    errors.push('Add at least one use case before opening the use-case round.');
+  }
+  if (prospective.examMode === 'mcq' && prospective.timingMode === 'section' && prospective.examOpen && sectionTimesMissing().length) {
+    errors.push(`Set a time for every section before opening the exam (missing: ${sectionTimesMissing().join(', ')}).`);
   }
   if (errors.length) return res.status(400).json({ error: errors.join(' ') });
+  for (const [k, v] of writes) setSetting(k, v);
   res.json(getSettings());
 });
 
