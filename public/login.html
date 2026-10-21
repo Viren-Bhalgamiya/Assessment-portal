@@ -31,7 +31,7 @@
           <div class="input-icon"><input type="text" id="username" required autofocus autocapitalize="off" autocomplete="username" spellcheck="false" placeholder="Enter your email ID"></div>
         </label>
         <label class="field"><span>Password</span>
-          <div class="input-icon"><input type="password" id="password" required placeholder="Enter your password"></div>
+          <div class="input-icon password-wrap"><input type="password" id="password" required placeholder="Enter your password"><button type="button" class="toggle-pass" data-target="password" aria-label="Show password">Show</button></div>
         </label>
         <button type="submit" class="primary" id="login-btn">Sign In</button>
         <p class="error-text" id="login-error" role="alert"></p>
@@ -45,10 +45,17 @@
           <div class="input-icon"><input type="text" id="reg-name" required placeholder="As per college records"></div>
         </label>
         <label class="field"><span>Password</span>
-          <div class="input-icon"><input type="password" id="reg-pass" required minlength="6" placeholder="Minimum 6 characters"></div>
+          <div class="input-icon password-wrap"><input type="password" id="reg-pass" required minlength="8" placeholder="Min 8 chars, upper, lower, number, symbol" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}" title="At least 8 characters including uppercase, lowercase, number, and special character"><button type="button" class="toggle-pass" data-target="reg-pass" aria-label="Show password">Show</button></div>
+          <ul class="pw-checklist" id="pw-checklist" aria-live="polite">
+            <li data-rule="len"><span class="mark">✖</span> At least 8 characters</li>
+            <li data-rule="upper"><span class="mark">✖</span> One uppercase letter (A-Z)</li>
+            <li data-rule="lower"><span class="mark">✖</span> One lowercase letter (a-z)</li>
+            <li data-rule="digit"><span class="mark">✖</span> One number (0-9)</li>
+            <li data-rule="symbol"><span class="mark">✖</span> One special character (!@#$...)</li>
+          </ul>
         </label>
         <label class="field"><span>Confirm Password</span>
-          <div class="input-icon"><input type="password" id="reg-pass2" required minlength="6" placeholder="Re-enter password"></div>
+          <div class="input-icon password-wrap"><input type="password" id="reg-pass2" required minlength="8" placeholder="Re-enter password"><button type="button" class="toggle-pass" data-target="reg-pass2" aria-label="Show password">Show</button></div>
         </label>
         <button type="submit" class="primary" id="reg-btn">Submit Registration</button>
         <p class="error-text" id="reg-error" role="alert"></p>

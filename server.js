@@ -440,7 +440,7 @@ app.post('/api/register', safe(async (req, res) => {
   const password = String(req.body?.password || '');
   if (!validEmail(username)) return res.status(400).json({ error: 'Enter a valid email ID (for example name@college.edu).' });
   if (name.length < 2 || name.length > 100) return res.status(400).json({ error: 'Enter your full name.' });
-  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(password)) return res.status(400).json({ error: 'Password must be at least 8 characters and include uppercase, lowercase, a number, and a special character.' });
   if (await sql('SELECT 1 FROM users WHERE lower(username) = lower(?)').get(username)) {
     return res.status(409).json({ error: 'This email ID is already registered. Sign in instead, or contact the examiner.' });
   }

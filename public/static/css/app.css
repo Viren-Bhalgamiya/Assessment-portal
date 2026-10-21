@@ -75,6 +75,14 @@ input:focus, textarea:focus, select:focus { outline: 2px solid #9dbbe8; outline-
 label.field { display: block; margin-bottom: .95em; }
 label.field > span { display: block; font-weight: 600; font-size: 13px; margin-bottom: .35em; color: var(--text-2); }
 .input-icon .icon { display: none; }
+.password-wrap { position: relative; }
+.password-wrap input { padding-right: 60px; }
+.toggle-pass { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: transparent; border: 1px solid var(--border-2); color: var(--text-2); padding: 4px 8px; font-size: 12px; font-weight: 600; border-radius: 4px; cursor: pointer; }
+.toggle-pass:hover { background: #f0f0f0; }
+.pw-checklist { list-style: none; padding: 6px 0 0; margin: 6px 0 0; font-size: 12.5px; }
+.pw-checklist li { display: flex; align-items: center; gap: 6px; color: var(--danger); margin: 2px 0; }
+.pw-checklist li.ok { color: var(--ok, #2a7a35); }
+.pw-checklist .mark { display: inline-block; width: 14px; text-align: center; font-weight: 700; }
 
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
 .center-screen { min-height: calc(100vh - 110px); display: flex; align-items: center; justify-content: center; padding: 24px; }
