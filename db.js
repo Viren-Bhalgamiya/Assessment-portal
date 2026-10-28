@@ -27,6 +27,8 @@ const DEFAULT_SETTINGS = {
   timing_mode: 'overall',   // 'overall' = one timer; 'section' = a timer per section
   duration_min: '150',
   max_violations: '3',
+  camera_required: '1',     // MCQ test: webcam must be on ('0' = not used)
+  mic_required: '1',        // MCQ test: microphone must be on ('0' = not used)
   snapshot_interval_sec: '60',
 };
 
@@ -343,6 +345,8 @@ function buildSettings() {
     timingMode: map.timing_mode === 'section' ? 'section' : 'overall',
     durationMin: Number(map.duration_min),
     maxViolations: Number(map.max_violations),
+    cameraRequired: map.camera_required !== '0',
+    microphoneRequired: map.mic_required !== '0',
     snapshotIntervalSec: Number(map.snapshot_interval_sec),
   });
 }

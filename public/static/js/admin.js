@@ -711,6 +711,8 @@ function fillSettings() {
   $('#set-timing-section').checked = s.timingMode === 'section';
   syncTimingFields();
   $('#set-maxv').value = s.maxViolations;
+  $('#set-cam').checked = s.cameraRequired;
+  $('#set-mic').checked = s.microphoneRequired;
   $('#set-org').value = s.orgName;
   $('#set-exam').value = s.examName;
   $('#set-uc-marks').value = s.ucMaxMarks;
@@ -741,6 +743,8 @@ $('#settings-form').onsubmit = async (e) => {
       registrationOpen: $('#set-reg').checked,
       timingMode: $('#set-timing-section').checked ? 'section' : 'overall',
       maxViolations: Number($('#set-maxv').value),
+      cameraRequired: $('#set-cam').checked,
+      microphoneRequired: $('#set-mic').checked,
       orgName: $('#set-org').value,
       examName: $('#set-exam').value,
       ucMaxMarks: Number($('#set-uc-marks').value),

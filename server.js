@@ -524,6 +524,7 @@ app.get('/api/exam/status', requireRole('student'), oneAtATime, async (req, res)
     sectionTimes: nonEmptySections().map((x) => ({ title: x.title, minutes: x.minutes })),
     marking: uniformMarking(),
     maxViolations: s.maxViolations,
+    cameraRequired: s.cameraRequired, microphoneRequired: s.microphoneRequired,
     questionCount: bank().BY_ID.size,
     status: att ? att.status : 'none',
     remainingSec: att && att.status === 'in_progress' ? remainingSec(att) : null,
@@ -941,6 +942,8 @@ admin.put('/settings', async (req, res) => {
   const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
   if (b.examOpen !== undefined) await setSetting('exam_open', b.examOpen ? '1' : '0');
   if (b.registrationOpen !== undefined) await setSetting('registration_open', b.registrationOpen ? '1' : '0');
+  if (b.cameraRequired !== undefined) await setSetting('camera_required', b.cameraRequired ? '1' : '0');
+  if (b.microphoneRequired !== undefined) await setSetting('mic_required', b.microphoneRequired ? '1' : '0');
   // Each test has its own schedule.
   for (const [label, sKey, eKey, startField, endField, table] of [
     ['MCQ test', 'schedule_start', 'schedule_end', 'scheduleStart', 'scheduleEnd', 'attempts'],

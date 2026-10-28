@@ -9,6 +9,7 @@ const S = {
   deadlineLocal: 0, warned5: false,
   violations: 0, maxViolations: 3, secCounts: [],
   cam: null, screen: null, camMutedAt: 0,
+  camReq: true, micReq: true, // whether the admin requires the webcam / microphone
   mic: null, micMutedAt: 0, audio: null, // audio = { ctx, analyser, buf, floor, loud: [], lastVoice, silentSince, recording }
   started: false, ended: false, submitting: false,
   focusLost: false, inPicker: false, resuming: false,
@@ -122,6 +123,11 @@ async function init() {
 }
 
 function showSetup(st) {
+  S.camReq = st.cameraRequired !== false;
+  S.micReq = st.microphoneRequired !== false;
+  $('#step-camera').hidden = !S.camReq;
+  $('#step-mic').hidden = !S.micReq;
+  $('#agree-devices').textContent = `, including my ${[S.camReq && 'webcam', S.micReq && 'microphone', 'screen'].filter(Boolean).join(', ').replace(/, ([^,]*)$/, ' and $1')},`;
   $('#setup-who').textContent = `${S.me.name} (${S.me.username})`;
   $('#resume-note').hidden = st.status !== 'in_progress';
   // Resuming mid-exam: the clock is running, so leaving the page here is monitored too.
@@ -151,13 +157,15 @@ function showSetup(st) {
       : 'The marks for each question are displayed above the question. Wrong answers may carry negative marks. No marks are awarded or deducted for unattempted questions.'],
     ['book', 'To answer a question, select an option and click "Save & Next". Use "Mark for Review & Next" to revisit a question later; answered questions marked for review will be evaluated. Use "Clear Response" to remove a selected answer.'],
     ['book', 'Use the question palette on the right to move directly to any question of the current section. The colour of each number shows the status of the question (see the legend below).'],
-    ['alert', 'Your webcam and microphone must stay on for the whole test. Sound around you is monitored, and detected speech is reported to the examination authority. Turning off or muting the microphone is recorded as a violation.', true],
+    ...(S.micReq ? [['alert', `${S.camReq ? 'Your webcam and microphone' : 'Your microphone'} must stay on for the whole test. Sound around you is monitored, and detected speech is reported to the examination authority. Turning off or muting the microphone is recorded as a violation.`, true]] : []),
     ['maximize', 'The test runs in full-screen mode. Switching to another tab, window or application, minimising the browser, leaving full-screen mode or reloading the page is recorded as a violation.', true],
     ['copyoff', 'Copying, cutting, pasting, right-clicking and keyboard shortcuts are not permitted. Any such attempt is recorded as a violation.', true],
     ['alert', st.maxViolations > 0
       ? `If ${st.maxViolations} violations are recorded, the test is submitted automatically and cannot be re-attempted.`
       : 'Every violation is recorded and reviewed by the examination authority.', true],
-    ['camera', 'Your webcam must remain switched on with your face clearly visible, and your entire screen must be shared for the whole test. Both are monitored.'],
+    ['camera', S.camReq
+      ? 'Your webcam must remain switched on with your face clearly visible, and your entire screen must be shared for the whole test. Both are monitored.'
+      : 'Your entire screen must be shared for the whole test, and it is monitored.'],
     ['shield', 'Responses are saved automatically. Marks are not displayed after submission; results will be declared by the examination authority.'],
   ];
   $('#rules').replaceChildren(...rules.map(([ic, text, danger]) => h('li', { class: danger ? 'danger' : null }, icon(ic), h('span', null, text))));
@@ -178,7 +186,7 @@ const hasExtraMonitor = () => window.screen.isExtended === true;
 const stopStream = (stream) => stream?.getTracks().forEach((t) => t.stop());
 
 function updateStartButton() {
-  $('#btn-start').disabled = !(isLive(S.cam) && isLiveAudio(S.mic) && isLive(S.screen) && !hasExtraMonitor() && $('#agree').checked);
+  $('#btn-start').disabled = !((!S.camReq || isLive(S.cam)) && (!S.micReq || isLiveAudio(S.mic)) && isLive(S.screen) && !hasExtraMonitor() && $('#agree').checked);
 }
 
 function refreshMonitorStep() {
@@ -395,6 +403,9 @@ function beginExam(data) {
   preview.hidden = true;
   preview.srcObject = null;
   show('screen-exam');
+  // devices the admin switched off are not shown
+  $('#cam-video').hidden = !S.camReq;
+  $('#cam-box .mic-row').hidden = !S.micReq;
 
   buildSectionTabs();
   goTo(firstUnanswered());
@@ -854,10 +865,14 @@ function onScreenLost(detail) {
 
 function checkDevices() {
   if (!S.started || S.ended) return;
-  if (!isLive(S.cam)) onCameraLost('Camera feed ended');
-  else if (S.camMutedAt && Date.now() - S.camMutedAt > 8000) { S.camMutedAt = 0; onCameraLost('Camera feed was interrupted for more than 8 seconds'); }
-  if (!isLiveAudio(S.mic)) onMicLost('Microphone feed ended');
-  else if (S.micMutedAt && Date.now() - S.micMutedAt > 8000) { S.micMutedAt = 0; onMicLost('Microphone was muted or interrupted for more than 8 seconds'); }
+  if (S.camReq) {
+    if (!isLive(S.cam)) onCameraLost('Camera feed ended');
+    else if (S.camMutedAt && Date.now() - S.camMutedAt > 8000) { S.camMutedAt = 0; onCameraLost('Camera feed was interrupted for more than 8 seconds'); }
+  }
+  if (S.micReq) {
+    if (!isLiveAudio(S.mic)) onMicLost('Microphone feed ended');
+    else if (S.micMutedAt && Date.now() - S.micMutedAt > 8000) { S.micMutedAt = 0; onMicLost('Microphone was muted or interrupted for more than 8 seconds'); }
+  }
   if (!isLive(S.screen)) onScreenLost('Screen sharing ended');
   if (hasExtraMonitor() && !S.blockers.has('monitor')) {
     warn('multiple_monitors', 'An additional display was connected', 'an extra monitor was connected.');
