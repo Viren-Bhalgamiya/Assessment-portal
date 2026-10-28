@@ -454,7 +454,8 @@ app.post('/api/register', safe(async (req, res) => {
   const passwordHash = await hashPassword(password);
   let userId;
   try {
-    userId = await sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'pending', ?)")
+    // Self-registrations are auto-approved. Admins can still revoke access later via the reject endpoint.
+    userId = await sql("INSERT INTO users (username, name, password_hash, role, status, created_at) VALUES (?, ?, ?, 'student', 'approved', ?)")
       .insert(username, name, passwordHash, now());
   } catch (e) {
     if (isUniqueError(e)) return res.status(409).json({ error: 'This email ID is already registered. Sign in instead, or contact the examiner.' });
@@ -465,7 +466,7 @@ app.post('/api/register', safe(async (req, res) => {
   const token = crypto.randomBytes(32).toString('hex');
   await sql('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(sha256(token), userId, now() + SESSION_MS);
   setSessionCookie(res, token, SESSION_MS / 1000);
-  res.json({ role: 'student', status: 'pending' });
+  res.json({ role: 'student', status: 'approved' });
 }));
 
 app.get('/api/registration', async (req, res) => {
