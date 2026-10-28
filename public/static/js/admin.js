@@ -198,7 +198,7 @@ function renderStudents() {
       h('td', null, h('strong', null, s.username)),
       h('td', null, h('span', { class: 'cell-user' }, avatar(s.name, s.username), s.name)),
       h('td', null, approvalBadge(s.approval)),
-      h('td', null, trackSelect(s)),
+      h('td', null, h('span', { class: `badge ${s.track === 'mcq' ? 'primary' : 'neutral'}` }, s.track === 'mcq' ? 'MCQ Test' : 'Use-Case Round')),
       h('td', null, statusBadge(s.status)),
       h('td', null,
         s.approval === 'rejected' && h('button', { class: 'small', onclick: () => setApproval(s, 'approve') }, 'Approve'), ' ',
@@ -210,22 +210,6 @@ function renderStudents() {
 }
 $('#student-search').oninput = renderStudents;
 
-// A candidate's test: automatic by email, or chosen by the admin (only before they start).
-function trackSelect(s) {
-  const started = s.mcqStatus !== 'not_started' || s.ucStatus !== 'not_started';
-  const sel = h('select', { disabled: started, title: started ? 'Already started. Use "Allow Re-attempt" first to change the test.' : 'Which test this candidate takes' },
-    h('option', { value: 'mcq' }, 'MCQ Test'),
-    h('option', { value: 'usecase' }, 'Use-Case Round'));
-  sel.value = s.track;
-  sel.onchange = async () => {
-    try {
-      await api('PUT', `/api/admin/students/${s.id}/track`, { track: sel.value });
-      toast(`${s.username} will take the ${sel.value === 'mcq' ? 'MCQ Test' : 'Use-Case Round'}.`);
-      await loadSummary();
-    } catch (err) { toast(err.message, 'warn'); sel.value = s.track; }
-  };
-  return sel;
-}
 
 async function setApproval(s, action) {
   try {

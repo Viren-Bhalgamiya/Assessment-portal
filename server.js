@@ -113,7 +113,7 @@ async function sessionUser(req) {
   const token = parseCookies(req.headers.cookie).sid;
   if (!token) return null;
   return await sql(`
-    SELECT u.id, u.username, u.name, u.role, u.status, u.track FROM sessions s JOIN users u ON u.id = s.user_id
+    SELECT u.id, u.username, u.name, u.role, u.status FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?`).get(sha256(token), now()) || null;
 }
 
@@ -752,7 +752,7 @@ admin.use(requireRole('admin'));
 
 admin.get('/summary', async (req, res) => {
   const rows = await sql(`
-    SELECT u.id, u.username, u.name, u.status AS approval, u.track, u.created_at,
+    SELECT u.id, u.username, u.name, u.status AS approval, u.created_at,
            a.id AS attempt_id, a.status, a.score, a.section_scores, a.violations,
            a.started_at, a.submitted_at, a.submit_reason, a.deadline,
            ua.status AS uc_status
@@ -765,7 +765,7 @@ admin.get('/summary', async (req, res) => {
     students: rows.map((r) => ({
       id: r.id, username: r.username, name: r.name,
       approval: r.approval, registeredAt: r.created_at,
-      track: trackOf(r), trackSet: r.track === 'mcq' || r.track === 'usecase',
+      track: trackOf(r),
       status: r.status || 'not_started',
       ucStatus: r.uc_status || 'not_started',
       score: r.score, sectionScores: parseJSON(r.section_scores, null),
@@ -896,18 +896,6 @@ admin.post('/students/:id/reset-attempt', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Choose a candidate's test by hand (or back to automatic, by email). Not once they have started one.
-admin.put('/students/:id/track', async (req, res) => {
-  const id = Number(req.params.id);
-  const track = req.body?.track === 'mcq' || req.body?.track === 'usecase' ? req.body.track : null;
-  if (req.body?.track && !track) return res.status(400).json({ error: 'Unknown test.' });
-  const user = await sql("SELECT id FROM users WHERE id = ? AND role = 'student'").get(id);
-  if (!user) return res.status(404).json({ error: 'Student not found.' });
-  const started = (await sql('SELECT (SELECT COUNT(*) FROM attempts WHERE user_id = ?) + (SELECT COUNT(*) FROM uc_attempts WHERE user_id = ?) AS n').get(id, id)).n;
-  if (started) return res.status(409).json({ error: 'This candidate has already started a test. Use "Allow Re-attempt" first to change their test.' });
-  await sql('UPDATE users SET track = ? WHERE id = ?').run(track, id);
-  res.json({ ok: true });
-});
 
 admin.post('/students/:id/force-submit', async (req, res) => {
   const att = await sql("SELECT id FROM attempts WHERE user_id = ? AND status = 'in_progress'").get(Number(req.params.id));
@@ -1127,7 +1115,7 @@ admin.get('/usecases/:id/pdf', async (req, res) => {
 // Results of the use-case round, with evaluation.
 async function ucResults() {
   return (await sql(`
-    SELECT u.id, u.username, u.name, u.track, ua.status, ua.started_at, ua.deadline, ua.submitted_at, ua.submit_reason,
+    SELECT u.id, u.username, u.name, ua.status, ua.started_at, ua.deadline, ua.submitted_at, ua.submit_reason,
            ua.url, ua.marks, ua.remarks, ua.evaluated_at, uc.title AS usecase
     FROM users u LEFT JOIN uc_attempts ua ON ua.user_id = u.id LEFT JOIN usecases uc ON uc.id = ua.usecase_id
     WHERE u.role = 'student' AND u.status = 'approved' ORDER BY u.username`).all())
@@ -1181,7 +1169,7 @@ admin.get('/export.csv', async (req, res) => {
   const header = ['Email ID', 'Name', 'Status', `Score (/${bank().MAX_SCORE})`, ...bank().SECTIONS.map((s) => s.title),
     'Correct', 'Wrong', 'Unattempted', 'Warnings', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'];
   const rows = (await sql(`
-    SELECT u.username, u.name, u.track, a.status, a.score, a.section_scores, a.violations, a.started_at, a.submitted_at, a.submit_reason
+    SELECT u.username, u.name, a.status, a.score, a.section_scores, a.violations, a.started_at, a.submitted_at, a.submit_reason
     FROM users u LEFT JOIN attempts a ON a.user_id = u.id
     WHERE u.role = 'student' AND u.status = 'approved' ORDER BY a.score DESC NULLS LAST, u.username`).all())
     .filter((r) => trackOf(r) === 'mcq' || r.status); // MCQ candidates (and anyone who took it before switching)

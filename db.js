@@ -46,7 +46,6 @@ function schema(d) {
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL CHECK (role IN ('student', 'admin')),
     status        TEXT NOT NULL DEFAULT 'approved',  -- students: pending -> approved | rejected
-    track         TEXT,          -- 'mcq' | 'usecase' set by the admin; NULL = decided by the email domain
     created_at    ${TS} NOT NULL
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (${d === 'pg' ? 'lower(username)' : 'username'});
@@ -263,7 +262,6 @@ async function migrateSqlite() {
     if (!(await driver.columns(table)).includes(col)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   };
   await add('users', 'status', "TEXT NOT NULL DEFAULT 'approved'");
-  await add('users', 'track', 'TEXT');
   await add('attempts', 'last_seq', 'INTEGER NOT NULL DEFAULT 0');
   await add('attempts', 'timing', 'TEXT');
   await add('attempts', 'sec_index', 'INTEGER NOT NULL DEFAULT 0');
@@ -288,8 +286,6 @@ async function init() {
     try { await driver.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (username)'); } catch { /* exists */ }
   } else {
     await driver.exec(schema('pg'));
-    // columns added after the first PostgreSQL deployment
-    await driver.exec('ALTER TABLE users ADD COLUMN IF NOT EXISTS track TEXT');
   }
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
     await sql('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING').run(k, v);
@@ -359,11 +355,8 @@ async function setSetting(key, value) {
 
 const close = () => driver?.close();
 
-// Which test a candidate takes: the admin's choice if set, otherwise BIT Mesra emails take the MCQ test
-// and everyone else the use-case round.
+// Which test a candidate takes, from their email: BIT Mesra takes the MCQ test, everyone else the use-case round.
 const MCQ_EMAIL_DOMAIN = '@bitmesra.ac.in';
-const trackOf = (user) => (user.track === 'mcq' || user.track === 'usecase'
-  ? user.track
-  : String(user.username || '').toLowerCase().endsWith(MCQ_EMAIL_DOMAIN) ? 'mcq' : 'usecase');
+const trackOf = (user) => (String(user.username || '').toLowerCase().endsWith(MCQ_EMAIL_DOMAIN) ? 'mcq' : 'usecase');
 
 module.exports = { DATA_DIR, DRIVER, init, sql, isUniqueError, getSettings, setSetting, scheduleOf, trackOf, MCQ_EMAIL_DOMAIN, close };
