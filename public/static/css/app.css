@@ -90,6 +90,7 @@ label.field > span { display: block; font-weight: 600; font-size: 13px; margin-b
 .alert { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius); font-size: 13.5px; margin-bottom: 14px; }
 .alert.warn { background: var(--warn-soft); color: #6d4000; border: 1px solid #f0d19a; border-left: 4px solid var(--stripe); }
 .alert .icon { display: none; }
+.alert.info { background: var(--primary-soft); color: var(--text); border: 1px solid #bcd1f0; border-left: 4px solid var(--primary); display: block; }
 .spinner { width: 32px; height: 32px; border-radius: 50%; border: 3px solid var(--border); border-top-color: var(--head); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -452,3 +453,10 @@ table.data tfoot td { background: #f3f5f8; border-top: 1px solid var(--border); 
 .schedule-grid input, .schedule-grid button { height: 40px; }
 .schedule-grid button { white-space: nowrap; }
 @media (max-width: 640px) { .schedule-grid { grid-template-columns: 1fr; } }
+
+/* dashboard: MCQ / use-case results */
+.view-switch { display: inline-flex; border: 1px solid var(--border-2); margin-bottom: 14px; background: #fff; }
+.view-switch button { border: 0; border-radius: 0; padding: .55em 1.1em; font-weight: 600; background: #fff; color: var(--text-2); }
+.view-switch button + button { border-left: 1px solid var(--border-2); }
+.view-switch button.active { background: var(--head); color: #fff; }
+.view-switch button.active .muted { color: #c9d6ee; }

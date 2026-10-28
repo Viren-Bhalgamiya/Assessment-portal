@@ -8,7 +8,7 @@ const express = require('express');
 const compression = require('compression');
 
 const db = require('./db');
-const { sql, isUniqueError, getSettings, setSetting } = db;
+const { sql, isUniqueError, getSettings, setSetting, scheduleOf, trackOf } = db;
 const storage = require('./storage');
 const {
   LETTERS, MARK_CORRECT, MARK_WRONG, seed, bank, validate, createQuestion, updateQuestion, deleteQuestion,
@@ -113,9 +113,13 @@ async function sessionUser(req) {
   const token = parseCookies(req.headers.cookie).sid;
   if (!token) return null;
   return await sql(`
-    SELECT u.id, u.username, u.name, u.role, u.status FROM sessions s JOIN users u ON u.id = s.user_id
+    SELECT u.id, u.username, u.name, u.role, u.status, u.track FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.expires_at > ?`).get(sha256(token), now()) || null;
 }
+
+// Each candidate takes one test: 'mcq' or 'usecase' (see trackOf).
+const onlyTrack = (track) => (req, res, next) => (trackOf(req.user) === track ? next()
+  : res.status(403).json({ error: track === 'mcq' ? 'The MCQ test is not assigned to you.' : 'The use-case round is not assigned to you.', wrongTest: true }));
 
 const requireRole = (role) => (req, res, next) => sessionUser(req).then((user) => {
   if (!user) return res.status(401).json({ error: 'Please log in.' });
@@ -246,13 +250,14 @@ function uniformMarking() {
   return same ? { marks: qs[0].marks, negative: qs[0].negative } : null;
 }
 const sectionTimesMissing = () => nonEmptySections().filter((x) => !(x.minutes > 0)).map((x) => x.title);
-// Minutes from the start of the test window (or from now, once it has started) to the end time.
-function scheduledMinutes(s = getSettings()) {
-  if (!s.scheduleStart || !s.scheduleEnd) return 0;
-  return Math.max(0, Math.ceil((s.scheduleEnd - Math.max(s.now, s.scheduleStart)) / 60000));
+// Minutes from the start of a test's window (or from now, once it has started) to its end time.
+function scheduledMinutes(track, s = getSettings()) {
+  const { start, end } = scheduleOf(s, track);
+  if (!start || !end) return 0;
+  return Math.max(0, Math.ceil((end - Math.max(s.now, start)) / 60000));
 }
 function effectiveDurationMin() {
-  if (getSettings().timingMode !== 'section') return scheduledMinutes();
+  if (getSettings().timingMode !== 'section') return scheduledMinutes('mcq');
   return nonEmptySections().reduce((t, x) => t + (x.minutes || 0), 0);
 }
 
@@ -303,9 +308,10 @@ async function activeAttemptOr409(req, res) {
   return att;
 }
 
-function closedMessage(s) {
-  if (s.scheduleEnd && s.now >= s.scheduleEnd) return 'The test has ended.';
-  if (s.scheduleStart && s.now < s.scheduleStart) return 'The test has not started yet.';
+function closedMessage(s, track) {
+  const { start, end } = scheduleOf(s, track);
+  if (end && s.now >= end) return 'The test has ended.';
+  if (start && s.now < start) return 'The test has not started yet.';
   return 'The test has not been scheduled yet.';
 }
 
@@ -467,9 +473,9 @@ app.get('/api/registration', async (req, res) => {
   const { SECTIONS, BY_ID } = bank();
   res.json({
     orgName: st.orgName, examName: st.examName,
-    mode: st.examMode, useCaseMaxMarks: st.ucMaxMarks,
+    useCaseMaxMarks: st.ucMaxMarks,
     open: st.registrationOpen, questionCount: BY_ID.size,
-    durationMin: st.examMode === 'usecase' ? scheduledMinutes(st) : effectiveDurationMin(), maxWarnings: st.maxViolations,
+    durationMin: effectiveDurationMin(), maxWarnings: st.maxViolations,
     marking: uniformMarking(), maxScore: bank().MAX_SCORE,
     subjects: SECTIONS.filter((x) => x.items.length).map((x) => x.title.replace(/^Section [A-Z0-9]+: /, '')),
   });
@@ -485,14 +491,14 @@ app.post('/api/logout', async (req, res) => {
 app.get('/api/me', async (req, res) => {
   const user = await sessionUser(req);
   if (!user) return res.status(401).json({ error: 'Please log in.' });
-  res.json({ username: user.username, name: user.name, role: user.role, status: user.status });
+  res.json({ username: user.username, name: user.name, role: user.role, status: user.status, track: user.role === 'student' ? trackOf(user) : null });
 });
 
 // ---------- student exam API (never returns scores or answer keys) ----------
 app.get('/api/exam/status', requireRole('student'), oneAtATime, async (req, res) => {
   const s = getSettings();
   if (req.user.status !== 'approved') return res.json({ approval: req.user.status });
-  if (s.examMode === 'usecase') return res.json({ approval: 'approved', mode: 'usecase' });
+  if (trackOf(req.user) === 'usecase') return res.json({ approval: 'approved', mode: 'usecase' });
   let att = await currentAttempt(req.user.id);
   // Opening the exam page again mid-exam (reload, closed tab, crash) is a warning: otherwise a
   // student could reload to escape monitoring and browse freely on the pre-exam screen.
@@ -511,7 +517,7 @@ app.get('/api/exam/status', requireRole('student'), oneAtATime, async (req, res)
     approval: 'approved',
     violations: att ? att.violations : 0,
     lastSeq: att ? att.last_seq : 0,
-    examOpen: s.examOpen, scheduleStart: s.scheduleStart, scheduleEnd: s.scheduleEnd, serverTime: s.now,
+    examOpen: s.mcqOpen, scheduleStart: s.scheduleStart, scheduleEnd: s.scheduleEnd, serverTime: s.now,
     durationMin: effectiveDurationMin(),
     timingMode: s.timingMode,
     sectionTimes: nonEmptySections().map((x) => ({ title: x.title, minutes: x.minutes })),
@@ -523,14 +529,13 @@ app.get('/api/exam/status', requireRole('student'), oneAtATime, async (req, res)
   });
 });
 
-app.post('/api/exam/start', requireApprovedStudent, async (req, res) => {
+app.post('/api/exam/start', requireApprovedStudent, onlyTrack('mcq'), async (req, res) => {
   const s = getSettings();
   let att = await currentAttempt(req.user.id);
   if (att && att.status === 'submitted') return res.status(409).json({ error: 'Your exam has already been submitted.', submitted: true });
 
   if (!att) {
-    if (!s.examOpen) return res.status(403).json({ error: closedMessage(s) });
-    if (s.examMode !== 'mcq') return res.status(409).json({ error: 'The MCQ test is not active.' });
+    if (!s.mcqOpen) return res.status(403).json({ error: closedMessage(s, 'mcq') });
     if (!bank().BY_ID.size) return res.status(409).json({ error: 'The exam has no questions yet. Contact the examiner.' });
     let timing = null;
     let totalMs = s.scheduleEnd - now(); // until the end time
@@ -685,8 +690,8 @@ async function ucState(userId) {
   const att = await currentUcAttempt(userId);
   const u = att && att.status === 'in_progress' && att.usecase_id ? await uc.getUseCase(att.usecase_id) : null;
   return {
-    mode: s.examMode, examOpen: s.examOpen, scheduleStart: s.scheduleStart, scheduleEnd: s.scheduleEnd, serverTime: s.now,
-    durationMin: scheduledMinutes(s), maxMarks: s.ucMaxMarks,
+    mode: 'usecase', examOpen: s.ucOpen, scheduleStart: s.ucScheduleStart, scheduleEnd: s.ucScheduleEnd, serverTime: s.now,
+    durationMin: scheduledMinutes('usecase', s), maxMarks: s.ucMaxMarks,
     useCaseCount: await uc.countUseCases(),
     status: att ? att.status : 'none',
     remainingSec: att && att.status === 'in_progress' ? Math.max(0, Math.ceil((att.deadline - now()) / 1000)) : null,
@@ -696,21 +701,20 @@ async function ucState(userId) {
   };
 }
 
-app.get('/api/usecase/state', approvedStudent, async (req, res) => res.json(await ucState(req.user.id)));
+app.get('/api/usecase/state', approvedStudent, onlyTrack('usecase'), async (req, res) => res.json(await ucState(req.user.id)));
 
-app.post('/api/usecase/start', requireApprovedStudent, async (req, res) => {
+app.post('/api/usecase/start', requireApprovedStudent, onlyTrack('usecase'), async (req, res) => {
   const s = getSettings();
-  if (s.examMode !== 'usecase') return res.status(409).json({ error: 'The use-case round is not active.' });
   const existing = await currentUcAttempt(req.user.id);
   if (existing?.status === 'submitted') return res.status(409).json({ error: 'You have already submitted your solution.', submitted: true });
   if (!existing) {
-    if (!s.examOpen) return res.status(403).json({ error: closedMessage(s) });
+    if (!s.ucOpen) return res.status(403).json({ error: closedMessage(s, 'usecase') });
     const pick = await uc.pickUseCase();
     if (!pick) return res.status(409).json({ error: 'No use cases are available yet. Please contact the examination authority.' });
     const t = now();
     try {
       await sql("INSERT INTO uc_attempts (user_id, usecase_id, status, started_at, deadline, ip) VALUES (?, ?, 'in_progress', ?, ?, ?)")
-        .run(req.user.id, pick, t, s.scheduleEnd, req.ip);
+        .run(req.user.id, pick, t, s.ucScheduleEnd, req.ip);
     } catch (e) {
       if (!isUniqueError(e)) throw e; // double click: the first request already created it
     }
@@ -726,7 +730,7 @@ app.get('/api/usecase/pdf', approvedStudent, async (req, res) => {
   if (!sent) res.status(404).json({ error: 'No document is attached.' });
 });
 
-app.post('/api/usecase/submit', requireApprovedStudent, async (req, res) => {
+app.post('/api/usecase/submit', requireApprovedStudent, onlyTrack('usecase'), async (req, res) => {
   const att = await currentUcAttempt(req.user.id);
   if (!att) return res.status(404).json({ error: 'You have not started the test.' });
   if (att.status === 'submitted') return res.status(409).json({ error: 'You have already submitted your solution.', submitted: true });
@@ -747,7 +751,7 @@ admin.use(requireRole('admin'));
 
 admin.get('/summary', async (req, res) => {
   const rows = await sql(`
-    SELECT u.id, u.username, u.name, u.status AS approval, u.created_at,
+    SELECT u.id, u.username, u.name, u.status AS approval, u.track, u.created_at,
            a.id AS attempt_id, a.status, a.score, a.section_scores, a.violations,
            a.started_at, a.submitted_at, a.submit_reason, a.deadline,
            ua.status AS uc_status
@@ -760,6 +764,7 @@ admin.get('/summary', async (req, res) => {
     students: rows.map((r) => ({
       id: r.id, username: r.username, name: r.name,
       approval: r.approval, registeredAt: r.created_at,
+      track: trackOf(r), trackSet: r.track === 'mcq' || r.track === 'usecase',
       status: r.status || 'not_started',
       ucStatus: r.uc_status || 'not_started',
       score: r.score, sectionScores: parseJSON(r.section_scores, null),
@@ -879,14 +884,27 @@ admin.post('/students/:id/password', safe(async (req, res) => {
 }));
 
 admin.post('/students/:id/reset-attempt', async (req, res) => {
-  if (getSettings().examMode === 'usecase') {
-    const r = await sql('DELETE FROM uc_attempts WHERE user_id = ?').run(Number(req.params.id));
-    return r.changes ? res.json({ ok: true }) : res.status(404).json({ error: 'This candidate has no use-case attempt.' });
+  const id = Number(req.params.id);
+  const ucDeleted = (await sql('DELETE FROM uc_attempts WHERE user_id = ?').run(id)).changes;
+  const att = await sql('SELECT id FROM attempts WHERE user_id = ?').get(id);
+  if (att) {
+    await sql('DELETE FROM attempts WHERE id = ?').run(att.id);
+    await removeSnapshotDir(att.id);
   }
-  const att = await sql('SELECT id FROM attempts WHERE user_id = ?').get(Number(req.params.id));
-  if (!att) return res.status(404).json({ error: 'This student has no attempt.' });
-  await sql('DELETE FROM attempts WHERE id = ?').run(att.id);
-  await removeSnapshotDir(att.id);
+  if (!att && !ucDeleted) return res.status(404).json({ error: 'This candidate has no attempt.' });
+  res.json({ ok: true });
+});
+
+// Choose a candidate's test by hand (or back to automatic, by email). Not once they have started one.
+admin.put('/students/:id/track', async (req, res) => {
+  const id = Number(req.params.id);
+  const track = req.body?.track === 'mcq' || req.body?.track === 'usecase' ? req.body.track : null;
+  if (req.body?.track && !track) return res.status(400).json({ error: 'Unknown test.' });
+  const user = await sql("SELECT id FROM users WHERE id = ? AND role = 'student'").get(id);
+  if (!user) return res.status(404).json({ error: 'Student not found.' });
+  const started = (await sql('SELECT (SELECT COUNT(*) FROM attempts WHERE user_id = ?) + (SELECT COUNT(*) FROM uc_attempts WHERE user_id = ?) AS n').get(id, id)).n;
+  if (started) return res.status(409).json({ error: 'This candidate has already started a test. Use "Allow Re-attempt" first to change their test.' });
+  await sql('UPDATE users SET track = ? WHERE id = ?').run(track, id);
   res.json({ ok: true });
 });
 
@@ -934,24 +952,26 @@ admin.put('/settings', async (req, res) => {
   const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
   if (b.examOpen !== undefined) await setSetting('exam_open', b.examOpen ? '1' : '0');
   if (b.registrationOpen !== undefined) await setSetting('registration_open', b.registrationOpen ? '1' : '0');
-  if (b.scheduleStart !== undefined || b.scheduleEnd !== undefined) {
+  // Each test has its own schedule.
+  for (const [label, sKey, eKey, startField, endField, table] of [
+    ['MCQ test', 'schedule_start', 'schedule_end', 'scheduleStart', 'scheduleEnd', 'attempts'],
+    ['Use-case round', 'uc_schedule_start', 'uc_schedule_end', 'ucScheduleStart', 'ucScheduleEnd', 'uc_attempts'],
+  ]) {
+    if (b[startField] === undefined && b[endField] === undefined) continue;
     const cur = getSettings();
     const val = (v, old) => (v === undefined ? old : v === null || v === '' ? null : Number(v));
-    const start = val(b.scheduleStart, cur.scheduleStart);
-    const end = val(b.scheduleEnd, cur.scheduleEnd);
+    const start = val(b[startField], cur[startField]);
+    const end = val(b[endField], cur[endField]);
     const okTs = (v) => v === null || (Number.isSafeInteger(v) && v > 0);
-    if (!okTs(start) || !okTs(end)) errors.push('Enter a valid start and end date and time.');
-    else if (!start !== !end) errors.push('Set both the start and the end time (or clear both).');
-    else if (start && end && end <= start) errors.push('The end time must be after the start time.');
-    else if (end && end <= now() && end !== cur.scheduleEnd) errors.push('The end time must be in the future.');
+    if (!okTs(start) || !okTs(end)) errors.push(`${label}: enter a valid start and end date and time.`);
+    else if (!start !== !end) errors.push(`${label}: set both the start and the end time (or clear both).`);
+    else if (start && end && end <= start) errors.push(`${label}: the end time must be after the start time.`);
+    else if (end && end <= now() && end !== cur[endField]) errors.push(`${label}: the end time must be in the future.`);
     else {
-      await setSetting('schedule_start', start || '');
-      await setSetting('schedule_end', end || '');
-      if (end) {
-        // Candidates already taking the test also finish by the (new) end time.
-        await sql("UPDATE attempts SET deadline = ? WHERE status = 'in_progress' AND deadline > ?").run(end, end);
-        await sql("UPDATE uc_attempts SET deadline = ? WHERE status = 'in_progress' AND deadline > ?").run(end, end);
-      }
+      await setSetting(sKey, start || '');
+      await setSetting(eKey, end || '');
+      // Candidates already taking this test also finish by the (new) end time.
+      if (end) await sql(`UPDATE ${table} SET deadline = ? WHERE status = 'in_progress' AND deadline > ?`).run(end, end);
     }
   }
   if (b.durationMin !== undefined) intIn(b.durationMin, 1, 600) ? await setSetting('duration_min', b.durationMin) : errors.push('Duration must be 1–600 minutes.');
@@ -964,23 +984,15 @@ admin.put('/settings', async (req, res) => {
     if (!v || v.length > 80) errors.push(`${label} must be 1–80 characters.`);
     else await setSetting(key, v);
   }
-  const liveTests = async () => (await sql("SELECT (SELECT COUNT(*) FROM attempts WHERE status = 'in_progress') + (SELECT COUNT(*) FROM uc_attempts WHERE status = 'in_progress') AS n").get()).n;
-  if (b.examMode !== undefined && b.examMode !== getSettings().examMode) {
-    if (!['mcq', 'usecase'].includes(b.examMode)) errors.push('Unknown test type.');
-    else if (await liveTests()) errors.push('Candidates are taking a test right now. The test type can be changed after they finish.');
-    else await setSetting('exam_mode', b.examMode);
-  }
   if (b.ucDurationMin !== undefined) intIn(b.ucDurationMin, 1, 600) ? await setSetting('uc_duration_min', b.ucDurationMin) : errors.push('Use-case duration must be 1–600 minutes.');
   if (b.ucMaxMarks !== undefined) intIn(b.ucMaxMarks, 1, 1000) ? await setSetting('uc_max_marks', b.ucMaxMarks) : errors.push('Use-case maximum marks must be 1–1000.');
   const st = getSettings();
-  const willOpen = !!st.scheduleStart;
-  let notReady = null;
-  if (st.examMode === 'usecase' && willOpen && !(await uc.countUseCases())) {
-    notReady = 'Add at least one use case before the use-case round opens.';
-  } else if (st.examMode === 'mcq' && st.timingMode === 'section' && willOpen && sectionTimesMissing().length) {
-    notReady = `Set a time for every section before the exam opens (missing: ${sectionTimesMissing().join(', ')}).`;
+  if (st.ucScheduleStart && !(await uc.countUseCases())) {
+    errors.push('Add at least one use case before the use-case round opens.');
   }
-  if (notReady) errors.push(notReady);
+  if (st.scheduleStart && st.timingMode === 'section' && sectionTimesMissing().length) {
+    errors.push(`Set a time for every section before the MCQ test opens (missing: ${sectionTimesMissing().join(', ')}).`);
+  }
   if (errors.length) return res.status(400).json({ error: errors.join(' ') });
   res.json(getSettings());
 });
@@ -1114,10 +1126,11 @@ admin.get('/usecases/:id/pdf', async (req, res) => {
 // Results of the use-case round, with evaluation.
 async function ucResults() {
   return (await sql(`
-    SELECT u.id, u.username, u.name, ua.status, ua.started_at, ua.deadline, ua.submitted_at, ua.submit_reason,
+    SELECT u.id, u.username, u.name, u.track, ua.status, ua.started_at, ua.deadline, ua.submitted_at, ua.submit_reason,
            ua.url, ua.marks, ua.remarks, ua.evaluated_at, uc.title AS usecase
     FROM users u LEFT JOIN uc_attempts ua ON ua.user_id = u.id LEFT JOIN usecases uc ON uc.id = ua.usecase_id
-    WHERE u.role = 'student' AND u.status = 'approved' ORDER BY u.username`).all()).map((r) => ({
+    WHERE u.role = 'student' AND u.status = 'approved' ORDER BY u.username`).all())
+    .filter((r) => trackOf(r) === 'usecase' || r.status).map((r) => ({
     id: r.id, username: r.username, name: r.name, status: r.status || 'not_started', usecase: r.usecase || null,
     startedAt: r.started_at, submittedAt: r.submitted_at,
     submitReason: r.submit_reason === 'time_up' ? 'Time over' : r.submit_reason === 'admin' ? 'Force-submitted by admin' : r.submit_reason ? 'Submitted by candidate' : null,
@@ -1154,7 +1167,7 @@ admin.get('/export.csv', async (req, res) => {
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const iso = (t) => (t ? new Date(t).toISOString() : '');
-  if (getSettings().examMode === 'usecase') {
+  if (req.query.test === 'usecase') {
     const max = getSettings().ucMaxMarks;
     const lines = [['Email ID', 'Name', 'Status', 'Use Case', 'Solution Link', `Marks (/${max})`, 'Remarks', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'].map(cell).join(',')];
     for (const r of await ucResults()) {
@@ -1166,10 +1179,11 @@ admin.get('/export.csv', async (req, res) => {
   }
   const header = ['Email ID', 'Name', 'Status', `Score (/${bank().MAX_SCORE})`, ...bank().SECTIONS.map((s) => s.title),
     'Correct', 'Wrong', 'Unattempted', 'Warnings', 'Started (UTC)', 'Submitted (UTC)', 'Submit reason'];
-  const rows = await sql(`
-    SELECT u.username, u.name, a.status, a.score, a.section_scores, a.violations, a.started_at, a.submitted_at, a.submit_reason
+  const rows = (await sql(`
+    SELECT u.username, u.name, u.track, a.status, a.score, a.section_scores, a.violations, a.started_at, a.submitted_at, a.submit_reason
     FROM users u LEFT JOIN attempts a ON a.user_id = u.id
-    WHERE u.role = 'student' AND u.status = 'approved' ORDER BY a.score DESC NULLS LAST, u.username`).all();
+    WHERE u.role = 'student' AND u.status = 'approved' ORDER BY a.score DESC NULLS LAST, u.username`).all())
+    .filter((r) => trackOf(r) === 'mcq' || r.status); // MCQ candidates (and anyone who took it before switching)
   const lines = [header.map(cell).join(',')];
   for (const r of rows) {
     const sec = parseJSON(r.section_scores, null);
@@ -1182,7 +1196,7 @@ admin.get('/export.csv', async (req, res) => {
     ].map(cell).join(','));
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="exam-results.csv"');
+  res.setHeader('Content-Disposition', 'attachment; filename="mcq-results.csv"');
   res.send('﻿' + lines.join('\r\n'));
 });
 

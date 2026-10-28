@@ -52,9 +52,9 @@ $('#btn-logout').onclick = logout;
 // ---------- data ----------
 async function loadSummary(auto = false) {
   A.summary = await api('GET', '/api/admin/summary');
-  A.ucMode = A.summary.settings.examMode === 'usecase';
-  // in the use-case round each candidate's status is their use-case status
-  for (const s of A.summary.students) { s.mcqStatus = s.mcqStatus || s.status; s.status = A.ucMode ? s.ucStatus : s.mcqStatus; }
+  A.ucMode = A.view === 'usecase'; // which test's results the dashboard shows
+  // each candidate's status is the status of their own test
+  for (const s of A.summary.students) { s.mcqStatus = s.status; s.status = s.track === 'usecase' ? s.ucStatus : s.mcqStatus; }
   $('#mcq-results').hidden = A.ucMode;
   $('#uc-results').hidden = !A.ucMode;
   if (A.ucMode) await loadUcResults(!auto);
@@ -67,20 +67,33 @@ async function loadSummary(auto = false) {
 
 function renderExamState() {
   const s = A.summary.settings;
-  const open = s.examOpen;
+  const state = (open, start, end) => {
+    if (end && s.now >= end) return 'Ended';
+    if (!open && start && s.now < start) return `Opens ${fmtTime(start)}`;
+    if (open) return `Open until ${fmtTime(end)}`;
+    return 'Not scheduled';
+  };
   const el = $('#exam-state');
-  let state = open ? 'Open' : 'Not scheduled';
-  if (s.scheduleEnd && s.now >= s.scheduleEnd) state = 'Ended';
-  else if (!open && s.scheduleStart && s.now < s.scheduleStart) state = `Opens ${fmtTime(s.scheduleStart)}`;
-  else if (open && s.scheduleEnd) state = `Open until ${fmtTime(s.scheduleEnd)}`;
-  el.replaceChildren(h('span', { class: 'dot' }), `${A.ucMode ? 'Use-Case Round' : 'MCQ Test'} · ${state}`);
-  el.className = `badge ${open ? 'ok' : 'neutral'}`;
+  el.replaceChildren(h('span', { class: 'dot' }),
+    `MCQ: ${state(s.mcqOpen, s.scheduleStart, s.scheduleEnd)} · Use-Case: ${state(s.ucOpen, s.ucScheduleStart, s.ucScheduleEnd)}`);
+  el.className = `badge ${s.mcqOpen || s.ucOpen ? 'ok' : 'neutral'}`;
 }
+
+// Dashboard: MCQ results or use-case results.
+A.view = 'mcq';
+document.querySelectorAll('#view-switch button').forEach((btn) => {
+  btn.onclick = () => {
+    A.view = btn.dataset.view;
+    document.querySelectorAll('#view-switch button').forEach((b) => b.classList.toggle('active', b === btn));
+    loadSummary().catch((e) => toast(e.message, 'warn'));
+  };
+});
+const mcqCandidates = () => A.summary.students.filter((s) => s.track === 'mcq' || s.mcqStatus !== 'not_started');
 
 function renderStats() {
   if (A.ucMode) return renderUcStats();
   const pending = A.summary.students.filter((s) => s.approval === 'pending').length;
-  const st = A.summary.students.filter((s) => s.approval === 'approved');
+  const st = mcqCandidates().filter((s) => s.approval === 'approved');
   const done = st.filter((s) => s.status === 'submitted');
   const avg = done.length ? (done.reduce((t, s) => t + s.score, 0) / done.length).toFixed(1) : '—';
   const top = done.length ? Math.max(...done.map((s) => s.score)) : '—';
@@ -99,9 +112,9 @@ function renderStats() {
 }
 
 // ---------- results table ----------
-function filteredStudents(query, status, approval = 'approved') {
+function filteredStudents(query, status, approval = 'approved', list = A.summary.students) {
   const q = query.trim().toLowerCase();
-  return A.summary.students.filter((s) =>
+  return list.filter((s) =>
     (!approval || s.approval === approval) &&
     (!status || s.status === status) &&
     (!q || s.username.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)));
@@ -117,7 +130,7 @@ function sortValue(s, key) {
 
 function renderResults() {
   const { sections, maxScore } = A.summary;
-  const rows = filteredStudents($('#search').value, $('#filter-status').value);
+  const rows = filteredStudents($('#search').value, $('#filter-status').value, 'approved', mcqCandidates());
   const { key, dir } = A.sort;
   rows.sort((a, b) => {
     const x = sortValue(a, key);
@@ -155,7 +168,7 @@ function renderResults() {
 $('#search').oninput = renderResults;
 $('#filter-status').onchange = renderResults;
 $('#btn-refresh').onclick = () => loadSummary().catch((e) => toast(e.message, 'warn'));
-$('#btn-export').onclick = () => { location.href = '/api/admin/export.csv'; };
+$('#btn-export').onclick = () => { location.href = '/api/admin/export.csv?test=mcq'; };
 
 // ---------- students tab ----------
 const APPROVAL = { pending: ['Pending', 'warn'], approved: ['Approved', 'ok'], rejected: ['Rejected', 'danger'] };
@@ -180,11 +193,12 @@ function renderStudents() {
 
   const rows = filteredStudents($('#student-search').value, '', '').filter((s) => s.approval !== 'pending');
   $('#students-table').replaceChildren(
-    h('thead', null, h('tr', null, h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Approval'), h('th', null, 'Exam'), h('th', null, 'Actions'))),
+    h('thead', null, h('tr', null, h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Approval'), h('th', null, 'Test'), h('th', null, 'Status'), h('th', null, 'Actions'))),
     h('tbody', null, rows.length ? rows.map((s) => h('tr', null,
       h('td', null, h('strong', null, s.username)),
       h('td', null, h('span', { class: 'cell-user' }, avatar(s.name, s.username), s.name)),
       h('td', null, approvalBadge(s.approval)),
+      h('td', null, trackSelect(s)),
       h('td', null, statusBadge(s.status)),
       h('td', null,
         s.approval === 'rejected' && h('button', { class: 'small', onclick: () => setApproval(s, 'approve') }, 'Approve'), ' ',
@@ -192,9 +206,26 @@ function renderStudents() {
         h('button', { class: 'small', onclick: () => resetPassword(s) }, 'Reset Password'), ' ',
         s.status !== 'not_started' && h('button', { class: 'small danger', onclick: () => resetAttempt(s) }, 'Allow Re-attempt'), ' ',
         h('button', { class: 'small danger', onclick: () => deleteStudent(s) }, 'Delete')))) :
-      h('tr', null, h('td', { colspan: 5, class: 'empty' }, 'No approved or rejected students yet.'))));
+      h('tr', null, h('td', { colspan: 6, class: 'empty' }, 'No approved or rejected students yet.'))));
 }
 $('#student-search').oninput = renderStudents;
+
+// A candidate's test: automatic by email, or chosen by the admin (only before they start).
+function trackSelect(s) {
+  const started = s.mcqStatus !== 'not_started' || s.ucStatus !== 'not_started';
+  const sel = h('select', { disabled: started, title: started ? 'Already started. Use "Allow Re-attempt" first to change the test.' : 'Which test this candidate takes' },
+    h('option', { value: 'mcq' }, 'MCQ Test'),
+    h('option', { value: 'usecase' }, 'Use-Case Round'));
+  sel.value = s.track;
+  sel.onchange = async () => {
+    try {
+      await api('PUT', `/api/admin/students/${s.id}/track`, { track: sel.value });
+      toast(`${s.username} will take the ${sel.value === 'mcq' ? 'MCQ Test' : 'Use-Case Round'}.`);
+      await loadSummary();
+    } catch (err) { toast(err.message, 'warn'); sel.value = s.track; }
+  };
+  return sel;
+}
 
 async function setApproval(s, action) {
   try {
@@ -279,7 +310,7 @@ async function resetPassword(s) {
 }
 
 async function resetAttempt(s) {
-  const what = A.ucMode ? 'use-case attempt, submitted link and marks' : 'attempt, answers and warnings';
+  const what = s.track === 'usecase' ? 'use-case attempt, submitted link and marks' : 'attempt, answers and warnings';
   if (!confirm(`Delete ${s.username}'s ${what} so they can take the test again? This cannot be undone.`)) return;
   try {
     await api('POST', `/api/admin/students/${s.id}/reset-attempt`);
@@ -688,6 +719,8 @@ function fillSettings() {
   const s = A.summary.settings;
   $('#set-start').value = toLocalInput(s.scheduleStart);
   $('#set-end').value = toLocalInput(s.scheduleEnd);
+  $('#set-uc-start').value = toLocalInput(s.ucScheduleStart);
+  $('#set-uc-end').value = toLocalInput(s.ucScheduleEnd);
   syncScheduleFields();
   $('#set-reg').checked = s.registrationOpen;
   $('#set-timing-overall').checked = s.timingMode !== 'section';
@@ -696,20 +729,8 @@ function fillSettings() {
   $('#set-maxv').value = s.maxViolations;
   $('#set-org').value = s.orgName;
   $('#set-exam').value = s.examName;
-  $('#set-mode-mcq').checked = s.examMode !== 'usecase';
-  $('#set-mode-uc').checked = s.examMode === 'usecase';
   $('#set-uc-marks').value = s.ucMaxMarks;
-  syncModeFields();
 }
-
-function syncModeFields() {
-  const uc = $('#set-mode-uc').checked;
-  $('#uc-settings').hidden = !uc;
-  $('#mcq-settings').hidden = uc;
-  for (const el of $('#mcq-settings').querySelectorAll('input')) el.required = !uc && el.type === 'number';
-}
-$('#set-mode-mcq').onchange = syncModeFields;
-$('#set-mode-uc').onchange = syncModeFields;
 
 // In per-section mode the overall duration isn't used; show the section total instead.
 async function syncTimingFields() {
@@ -731,12 +752,13 @@ $('#settings-form').onsubmit = async (e) => {
     await api('PUT', '/api/admin/settings', {
       scheduleStart: fromLocalInput($('#set-start').value),
       scheduleEnd: fromLocalInput($('#set-end').value),
+      ucScheduleStart: fromLocalInput($('#set-uc-start').value),
+      ucScheduleEnd: fromLocalInput($('#set-uc-end').value),
       registrationOpen: $('#set-reg').checked,
       timingMode: $('#set-timing-section').checked ? 'section' : 'overall',
       maxViolations: Number($('#set-maxv').value),
       orgName: $('#set-org').value,
       examName: $('#set-exam').value,
-      examMode: $('#set-mode-uc').checked ? 'usecase' : 'mcq',
       ucMaxMarks: Number($('#set-uc-marks').value),
     });
     await loadSummary();
@@ -833,7 +855,7 @@ async function ucForceSubmit(r) {
 $('#uc-search').oninput = () => A.uc && renderUcResults();
 $('#uc-filter').onchange = () => A.uc && renderUcResults();
 $('#uc-refresh').onclick = () => loadSummary().catch((e) => toast(e.message, 'warn'));
-$('#uc-export').onclick = () => { location.href = '/api/admin/export.csv'; };
+$('#uc-export').onclick = () => { location.href = '/api/admin/export.csv?test=usecase'; };
 
 // ---------- use cases ----------
 const U = { list: [] };
@@ -843,9 +865,6 @@ async function loadUseCases() {
   const d = await api('GET', '/api/admin/usecases');
   U.list = d.usecases;
   $('#uc-count').textContent = String(U.list.length);
-  const note = $('#uc-mode-note');
-  note.hidden = d.settings.examMode === 'usecase';
-  note.textContent = 'The portal is currently set to the MCQ Test. To conduct the use-case round, choose "Use-Case Round" under Configuration → Test Type.';
   $('#usecases-table').replaceChildren(
     h('thead', null, h('tr', null, ['#', 'Title', 'Description', 'PDF', 'Assigned to', 'Actions'].map((t) => h('th', null, t)))),
     h('tbody', null, U.list.length ? U.list.map((u, i) => h('tr', null,
@@ -946,7 +965,9 @@ function toLocalInput(ms) {
 const fromLocalInput = (v) => (v ? new Date(v).getTime() : null);
 
 function syncScheduleFields() {}
-$('#btn-clear-schedule').onclick = () => { $('#set-start').value = ''; $('#set-end').value = ''; };
+document.querySelectorAll('.btn-clear-schedule').forEach((btn) => {
+  btn.onclick = () => { for (const id of btn.dataset.for.split(',')) $('#' + id).value = ''; };
+});
 
 // ---------- start ----------
 (async () => {

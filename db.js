@@ -14,8 +14,10 @@ const DRIVER = process.env.PGHOST || process.env.DATABASE_URL ? 'pg' : 'sqlite';
 
 const DEFAULT_SETTINGS = {
   exam_open: '0',
-  schedule_start: '',       // ms timestamp: the test opens by itself at this time ('' = not scheduled)
-  schedule_end: '',         // ms timestamp: the test closes and every attempt ends at this time
+  schedule_start: '',       // MCQ test: ms timestamp it opens at ('' = not scheduled)
+  schedule_end: '',         // MCQ test: ms timestamp it closes and every attempt ends
+  uc_schedule_start: '',    // use-case round: same, separate schedule
+  uc_schedule_end: '',
   registration_open: '1',
   exam_mode: 'mcq',          // 'mcq' = MCQ test (engineering); 'usecase' = use-case round
   uc_duration_min: '120',
@@ -44,6 +46,7 @@ function schema(d) {
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL CHECK (role IN ('student', 'admin')),
     status        TEXT NOT NULL DEFAULT 'approved',  -- students: pending -> approved | rejected
+    track         TEXT,          -- 'mcq' | 'usecase' set by the admin; NULL = decided by the email domain
     created_at    ${TS} NOT NULL
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (${d === 'pg' ? 'lower(username)' : 'username'});
@@ -260,6 +263,7 @@ async function migrateSqlite() {
     if (!(await driver.columns(table)).includes(col)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   };
   await add('users', 'status', "TEXT NOT NULL DEFAULT 'approved'");
+  await add('users', 'track', 'TEXT');
   await add('attempts', 'last_seq', 'INTEGER NOT NULL DEFAULT 0');
   await add('attempts', 'timing', 'TEXT');
   await add('attempts', 'sec_index', 'INTEGER NOT NULL DEFAULT 0');
@@ -284,6 +288,8 @@ async function init() {
     try { await driver.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (username)'); } catch { /* exists */ }
   } else {
     await driver.exec(schema('pg'));
+    // columns added after the first PostgreSQL deployment
+    await driver.exec('ALTER TABLE users ADD COLUMN IF NOT EXISTS track TEXT');
   }
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
     await sql('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING').run(k, v);
@@ -303,16 +309,25 @@ async function loadSettings() {
   settingsCache = null;
 }
 
-// The test is open only between the scheduled start and end time set by the admin.
-function openNow(base, t = Date.now()) {
-  const { scheduleStart: start, scheduleEnd: end } = base;
-  return !!(start && end && t >= start && t < end);
-}
+// A test is open only between its scheduled start and end time set by the admin.
+const openNow = (start, end, t) => !!(start && end && t >= start && t < end);
 
 function getSettings() {
   if (!settingsCache) settingsCache = buildSettings();
   const t = Date.now();
-  return Object.freeze({ ...settingsCache, examOpen: openNow(settingsCache, t), now: t });
+  const b = settingsCache;
+  return Object.freeze({
+    ...b, now: t,
+    mcqOpen: openNow(b.scheduleStart, b.scheduleEnd, t),
+    ucOpen: openNow(b.ucScheduleStart, b.ucScheduleEnd, t),
+  });
+}
+
+// Each test's schedule, in one shape: { start, end, open }.
+function scheduleOf(s, track) {
+  return track === 'usecase'
+    ? { start: s.ucScheduleStart, end: s.ucScheduleEnd, open: s.ucOpen }
+    : { start: s.scheduleStart, end: s.scheduleEnd, open: s.mcqOpen };
 }
 
 function buildSettings() {
@@ -322,8 +337,9 @@ function buildSettings() {
     examOpenManual: map.exam_open === '1',
     scheduleStart: ts(map.schedule_start),
     scheduleEnd: ts(map.schedule_end),
+    ucScheduleStart: ts(map.uc_schedule_start),
+    ucScheduleEnd: ts(map.uc_schedule_end),
     registrationOpen: map.registration_open === '1',
-    examMode: map.exam_mode === 'usecase' ? 'usecase' : 'mcq',
     ucDurationMin: Number(map.uc_duration_min) || 120,
     ucMaxMarks: Number(map.uc_max_marks) || 100,
     orgName: map.org_name || 'Online Examination System',
@@ -343,4 +359,11 @@ async function setSetting(key, value) {
 
 const close = () => driver?.close();
 
-module.exports = { DATA_DIR, DRIVER, init, sql, isUniqueError, getSettings, setSetting, close };
+// Which test a candidate takes: the admin's choice if set, otherwise BIT Mesra emails take the MCQ test
+// and everyone else the use-case round.
+const MCQ_EMAIL_DOMAIN = '@bitmesra.ac.in';
+const trackOf = (user) => (user.track === 'mcq' || user.track === 'usecase'
+  ? user.track
+  : String(user.username || '').toLowerCase().endsWith(MCQ_EMAIL_DOMAIN) ? 'mcq' : 'usecase');
+
+module.exports = { DATA_DIR, DRIVER, init, sql, isUniqueError, getSettings, setSetting, scheduleOf, trackOf, MCQ_EMAIL_DOMAIN, close };
