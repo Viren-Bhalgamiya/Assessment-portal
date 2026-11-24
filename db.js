@@ -360,7 +360,8 @@ async function setSetting(key, value) {
 const close = () => driver?.close();
 
 // Which test a candidate takes, from their email: BIT Mesra takes the MCQ test, everyone else the use-case round.
-const MCQ_EMAIL_DOMAIN = '@bitmesra.ac.in';
-const trackOf = (user) => (String(user.username || '').toLowerCase().endsWith(MCQ_EMAIL_DOMAIN) ? 'mcq' : 'usecase');
+const MCQ_EMAIL_DOMAINS = ['@bitmesra.ac.in', '@nitk.edu.in'];
+const MCQ_EMAIL_DOMAIN = MCQ_EMAIL_DOMAINS[0];
+const trackOf = (user) => (MCQ_EMAIL_DOMAINS.some((d) => String(user.username || '').toLowerCase().endsWith(d)) ? 'mcq' : 'usecase');
 
 module.exports = { DATA_DIR, DRIVER, init, sql, isUniqueError, getSettings, setSetting, scheduleOf, trackOf, MCQ_EMAIL_DOMAIN, close };
