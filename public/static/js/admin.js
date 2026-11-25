@@ -174,6 +174,7 @@ $('#btn-export').onclick = () => { location.href = '/api/admin/export.csv?test=m
 const APPROVAL = { pending: ['Pending', 'warn'], approved: ['Approved', 'ok'], rejected: ['Rejected', 'danger'] };
 const approvalBadge = (a) => h('span', { class: `badge ${APPROVAL[a][1]}` }, APPROVAL[a][0]);
 
+const selectedIds = new Set();
 function renderStudents() {
   const pending = A.summary.students.filter((s) => s.approval === 'pending').sort((a, b) => a.registeredAt - b.registeredAt);
   $('#pending-count').textContent = String(pending.length);
@@ -192,9 +193,23 @@ function renderStudents() {
       h('tr', null, h('td', { colspan: 4, class: 'empty' }, 'No pending registrations. New sign-ups appear here automatically.'))));
 
   const rows = filteredStudents($('#student-search').value, '', '').filter((s) => s.approval !== 'pending');
+  const known = new Set(A.summary.students.map((s) => s.id));
+  for (const id of selectedIds) if (!known.has(id)) selectedIds.delete(id);
+  const allOn = rows.length > 0 && rows.every((s) => selectedIds.has(s.id));
+  const refreshSel = () => {
+    const b = $('#btn-delete-selected');
+    b.textContent = `Delete Selected (${selectedIds.size})`;
+    b.disabled = !selectedIds.size;
+  };
+  const tick = (s) => h('input', { type: 'checkbox', checked: selectedIds.has(s.id), 'aria-label': `Select ${s.username}`,
+    onchange: (e) => { e.target.checked ? selectedIds.add(s.id) : selectedIds.delete(s.id); refreshSel(); renderStudents(); } });
   $('#students-table').replaceChildren(
-    h('thead', null, h('tr', null, h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Approval'), h('th', null, 'Test'), h('th', null, 'Status'), h('th', null, 'Actions'))),
+    h('thead', null, h('tr', null,
+      h('th', null, h('input', { type: 'checkbox', checked: allOn, 'aria-label': 'Select all shown',
+        onchange: (e) => { for (const s of rows) e.target.checked ? selectedIds.add(s.id) : selectedIds.delete(s.id); renderStudents(); } })),
+      h('th', null, 'Email ID'), h('th', null, 'Name'), h('th', null, 'Approval'), h('th', null, 'Test'), h('th', null, 'Status'), h('th', null, 'Actions'))),
     h('tbody', null, rows.length ? rows.map((s) => h('tr', null,
+      h('td', null, tick(s)),
       h('td', null, h('strong', null, s.username)),
       h('td', null, h('span', { class: 'cell-user' }, avatar(s.name, s.username), s.name)),
       h('td', null, approvalBadge(s.approval)),
@@ -206,9 +221,23 @@ function renderStudents() {
         h('button', { class: 'small', onclick: () => resetPassword(s) }, 'Reset Password'), ' ',
         s.status !== 'not_started' && h('button', { class: 'small danger', onclick: () => resetAttempt(s) }, 'Allow Re-attempt'), ' ',
         h('button', { class: 'small danger', onclick: () => deleteStudent(s) }, 'Delete')))) :
-      h('tr', null, h('td', { colspan: 6, class: 'empty' }, 'No approved or rejected students yet.'))));
+      h('tr', null, h('td', { colspan: 7, class: 'empty' }, 'No approved or rejected students yet.'))));
+  refreshSel();
 }
 $('#student-search').oninput = renderStudents;
+
+$('#btn-delete-selected').onclick = async () => {
+  const ids = [...selectedIds];
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} candidate${ids.length === 1 ? '' : 's'} and all their exam data? This cannot be undone.`)) return;
+  try {
+    const r = await api('POST', '/api/admin/students/bulk-delete', { ids });
+    toast(`Deleted ${r.deleted} candidate${r.deleted === 1 ? '' : 's'}.`);
+    selectedIds.clear();
+    if (ids.includes(A.openId)) closeDrawer();
+    await loadSummary();
+  } catch (err) { toast(err.message, 'warn'); }
+};
 
 
 async function setApproval(s, action) {

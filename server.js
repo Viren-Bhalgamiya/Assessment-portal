@@ -914,6 +914,21 @@ admin.delete('/students/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+admin.post('/students/bulk-delete', safe(async (req, res) => {
+  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Number.isSafeInteger))];
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one candidate.' });
+  let deleted = 0;
+  for (const id of ids) {
+    const user = await sql("SELECT id FROM users WHERE id = ? AND role = 'student'").get(id);
+    if (!user) continue;
+    const att = await sql('SELECT id FROM attempts WHERE user_id = ?').get(user.id);
+    await sql('DELETE FROM users WHERE id = ?').run(user.id);
+    if (att) await removeSnapshotDir(att.id);
+    deleted++;
+  }
+  res.json({ deleted });
+}));
+
 admin.get('/metrics', async (req, res) => {
   const pct = (a, p) => (a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))] : 0);
   const routes = {};
